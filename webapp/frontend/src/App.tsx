@@ -247,7 +247,7 @@ export default function App() {
   const [sellAmountSats, setSellAmountSats] = useState<string>('');
   const [premiumPercent, setPremiumPercent] = useState<string>('0');
   const [publishing, setPublishing] = useState<boolean>(false);
-  const [selectedBackingUtxoKey, setSelectedBackingUtxoKey] = useState<string>('');
+  const [selectedBackingChain, setSelectedBackingChain] = useState<'main' | 'bip110' | ''>('');
 
   // Withdraw State
   const [withdrawDestAddress, setWithdrawDestAddress] = useState<string>('');
@@ -494,9 +494,8 @@ export default function App() {
     const premium = Number(premiumPercent) || 0;
     const calculatedBuy = String(Math.round(amountVal * (1 + premium / 100)));
     
-    const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
-    if (utxo) {
-      if (utxo.chain === 'main') {
+    if (selectedBackingChain) {
+      if (selectedBackingChain === 'main') {
         setNewOfferBtc(valStr); // Selling BTC
         setNewOfferB110(calculatedBuy); // Buying B110
       } else {
@@ -512,9 +511,8 @@ export default function App() {
     const amountVal = Number(sellAmountSats) || 0;
     const calculatedBuy = String(Math.round(amountVal * (1 + premium / 100)));
 
-    const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
-    if (utxo) {
-      if (utxo.chain === 'main') {
+    if (selectedBackingChain) {
+      if (selectedBackingChain === 'main') {
         setNewOfferB110(calculatedBuy); // Buying B110
       } else {
         setNewOfferBtc(calculatedBuy); // Buying BTC
@@ -1704,18 +1702,10 @@ export default function App() {
     setPublishing(true);
     try {
       const coordinatorFees = await getCoordinatorFees();
-      if (!selectedBackingUtxoKey) {
-        throw new Error("Please select a split UTXO to back this offer.");
+      if (!selectedBackingChain) {
+        throw new Error("Please select a chain to back this offer.");
       }
-      const [backingTxid, voutStr] = selectedBackingUtxoKey.split('-');
-      const backingVout = Number(voutStr);
-      
-      const utxo = getAvailableSplitUtxos().find(u => u.txid === backingTxid && u.vout === backingVout);
-      const backingChain = utxo?.chain;
-
-      if (!utxo) {
-        throw new Error("Please select a split UTXO to back this offer.");
-      }
+      const backingChain = selectedBackingChain;
 
       const sellAmount = Number(sellAmountSats);
       if (!Number.isSafeInteger(sellAmount) || sellAmount <= 0) {
@@ -1728,8 +1718,7 @@ export default function App() {
       const fundingSelection = selectFundingUtxos(
         fundingCandidates,
         BigInt(sellAmount) + coordinatorFee,
-        estimateFundingFee,
-        utxo
+        estimateFundingFee
       );
       if (!fundingSelection) {
         const totalAvailable = fundingCandidates.reduce((sum, candidate) => sum + candidate.amount, 0);
@@ -1740,6 +1729,11 @@ export default function App() {
           `Maximum fundable amount is approximately ${maximumFundable.toLocaleString()} sats.`
         );
       }
+      // The first automatically selected input anchors the offer. The same
+      // selection algorithm is run again when the initiator funds the HTLC.
+      const anchorUtxo = fundingSelection.utxos[0];
+      const backingTxid = anchorUtxo.txid;
+      const backingVout = anchorUtxo.vout;
 
       let preimageHex = '';
 
@@ -1790,7 +1784,7 @@ export default function App() {
       sessionStorage.setItem(`preimage_${res.data.id}`, preimageHex);
 
       showToast('Swap offer published successfully to the marketplace!', 'success');
-      setSelectedBackingUtxoKey('');
+      setSelectedBackingChain('');
       await fetchOffers();
     } catch (err: any) {
       showToast('Publish offer failed: ' + err.message, 'error');
@@ -3273,36 +3267,26 @@ export default function App() {
               <form onSubmit={handleCreateOffer} className="space-y-6">
                 <div>
                   <label className="text-xs font-bold text-slate-400 block uppercase tracking-wider mb-2">
-                    Select Split UTXO to back this offer
+                    Select Chain to back this offer
                   </label>
                   <select
-                    value={selectedBackingUtxoKey}
+                    value={selectedBackingChain}
                     onChange={(e) => {
-                      const key = e.target.value;
-                      setSelectedBackingUtxoKey(key);
-                      if (key) {
-                        const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === key);
-                        if (utxo) {
-                          setSellAmountSats('');
-                          setPremiumPercent('0'); // Default to 0% (parity)
-                          setNewOfferB110('');
-                          setNewOfferBtc('');
-                        }
-                      } else {
-                        setSellAmountSats('');
-                        setPremiumPercent('0');
-                        setNewOfferB110('');
-                        setNewOfferBtc('');
-                      }
+                      setSelectedBackingChain(e.target.value as 'main' | 'bip110' | '');
+                      setSellAmountSats('');
+                      setPremiumPercent('0');
+                      setNewOfferB110('');
+                      setNewOfferBtc('');
                     }}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                   >
-                    <option value="">-- Choose a Split UTXO --</option>
-                    {getAvailableSplitUtxos().map(u => (
-                      <option key={`${u.txid}-${u.vout}`} value={`${u.txid}-${u.vout}`}>
-                        {u.chain === 'main' ? 'BTC' : 'BIP110'} ({(u.amount / 100000000).toFixed(4)} {u.chain === 'main' ? 'BTC' : 'B110'} | {u.txid.substring(0, 12)}...:{u.vout})
-                      </option>
-                    ))}
+                    <option value="">-- Choose a chain --</option>
+                    <option value="main" disabled={getSplitUtxosForChain('main').length === 0}>
+                      Bitcoin ({(getMainSplitBalance() / 100000000).toFixed(4)} BTC available)
+                    </option>
+                    <option value="bip110" disabled={getSplitUtxosForChain('bip110').length === 0}>
+                      BIP110-Chain ({(getBip110SplitBalance() / 100000000).toFixed(4)} B110 available)
+                    </option>
                   </select>
                   {!hasBalanceSnapshot ? (
                     <p className="text-xs text-amber-300 mt-2 flex items-center gap-2" role="status">
@@ -3315,11 +3299,9 @@ export default function App() {
                     </p>
                   )}
 
-                  {selectedBackingUtxoKey && (() => {
-                    const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
-                    if (!utxo) return null;
-                    const chainLabel = utxo.chain === 'main' ? 'BTC' : 'B110';
-                    const fundingCandidates = getSplitUtxosForChain(utxo.chain);
+                  {selectedBackingChain && (() => {
+                    const chainLabel = selectedBackingChain === 'main' ? 'BTC' : 'B110';
+                    const fundingCandidates = getSplitUtxosForChain(selectedBackingChain);
                     const aggregateBalance = fundingCandidates.reduce((sum, candidate) => sum + candidate.amount, 0);
                     return (
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mt-4">
@@ -3339,7 +3321,7 @@ export default function App() {
                             Aggregate split balance: <span className="font-semibold text-slate-400">{aggregateBalance.toLocaleString()} Sats</span> ({(aggregateBalance / 100000000).toFixed(4)} {chainLabel}) across {fundingCandidates.length} UTXO{fundingCandidates.length === 1 ? '' : 's'}. Fees must also fit within this balance.
                           </span>
                           <span className="text-[10px] text-slate-600 mt-1 block">
-                            The selected outpoint anchors the offer; additional split UTXOs are added automatically when funding it.
+                            Funding inputs and the offer's anchor outpoint are selected automatically from this chain.
                           </span>
                         </div>
 
@@ -3366,9 +3348,8 @@ export default function App() {
                   })()}
                 </div>
 
-                {selectedBackingUtxoKey && newOfferB110 && (() => {
-                  const utxo = getAvailableSplitUtxos().find(u => `${u.txid}-${u.vout}` === selectedBackingUtxoKey);
-                  const isMain = utxo?.chain === 'main';
+                {selectedBackingChain && newOfferB110 && (() => {
+                  const isMain = selectedBackingChain === 'main';
                   const premiumVal = Number(premiumPercent) || 0;
                   const premiumText = premiumVal > 0 
                     ? `at a +${premiumVal}% premium` 
@@ -3417,7 +3398,7 @@ export default function App() {
                   <div>
                     <button
                       type="submit"
-                      disabled={publishing || !selectedBackingUtxoKey}
+                      disabled={publishing || !selectedBackingChain}
                       className="w-full bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold text-sm rounded-xl py-2.5 shadow-lg shadow-indigo-600/10 transition-all"
                     >
                       {publishing ? 'Publishing...' : 'Publish Swap Offer'}
