@@ -35,7 +35,15 @@ import {
   Download,
   Upload,
   ChevronDown,
-  ChevronUp
+  ChevronUp,
+  ArrowLeft,
+  ArrowRight,
+  GitFork,
+  Handshake,
+  HelpCircle,
+  KeyRound,
+  TimerReset,
+  X
 } from 'lucide-react';
 
 // Initialize Elliptic Curve library in the browser
@@ -149,9 +157,177 @@ interface CoordinatorFees {
   receiveAddress: string;
 }
 
+const TUTORIAL_STORAGE_KEY = 'bip110swap_tutorial_seen_v1';
+
+const tutorialSteps = [
+  {
+    eyebrow: '01 / LOCAL CUSTODY',
+    title: 'Your keys stay in this browser.',
+    description: 'Create or import a wallet to derive addresses for both chains. Signing happens locally; the coordinator never receives your private key.',
+    note: 'One keyspace · two chain views',
+    icon: KeyRound,
+    tone: 'orange'
+  },
+  {
+    eyebrow: '02 / CHAIN SEPARATION',
+    title: 'Split once. Spend independently.',
+    description: 'The splitter classifies your outputs and prepares replay-protected UTXOs, so BTC and BIP110 balances can move without replaying across the fork.',
+    note: 'BTC output ↗  BIP110 output ↘',
+    icon: GitFork,
+    tone: 'cyan'
+  },
+  {
+    eyebrow: '03 / OFFER DESK',
+    title: 'Choose a chain, not every coin.',
+    description: 'Set the amount and publish or accept an offer. The wallet automatically selects enough eligible UTXOs and calculates the change output and network fee.',
+    note: 'Amount → selection → change',
+    icon: Handshake,
+    tone: 'lime'
+  },
+  {
+    eyebrow: '04 / ATOMIC SETTLEMENT',
+    title: 'Either both sides settle—or refund.',
+    description: 'Hashlocked transactions coordinate the swap. The secret unlocks both claims; if settlement stops, each party recovers funds after its agreed block offset.',
+    note: 'Hashlock first · timelock fallback',
+    icon: TimerReset,
+    tone: 'amber'
+  }
+] as const;
+
+interface TutorialCarouselProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+function TutorialCarousel({ open, onClose }: TutorialCarouselProps) {
+  const [step, setStep] = useState(0);
+  const current = tutorialSteps[step];
+  const CurrentIcon = current.icon;
+
+  useEffect(() => {
+    if (!open) return;
+
+    setStep(0);
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose();
+      if (event.key === 'ArrowRight') setStep((value) => Math.min(value + 1, tutorialSteps.length - 1));
+      if (event.key === 'ArrowLeft') setStep((value) => Math.max(value - 1, 0));
+    };
+
+    document.addEventListener('keydown', onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  const finish = () => {
+    localStorage.setItem(TUTORIAL_STORAGE_KEY, 'true');
+    onClose();
+  };
+
+  return (
+    <div
+      className="tutorial-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="tutorial-title"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) finish();
+      }}
+    >
+      <section className="tutorial-shell">
+        <header className="tutorial-topbar">
+          <div className="tutorial-wordmark">
+            <span className="tutorial-prompt">&gt;_</span>
+            <span>FIRST-RUN FIELD GUIDE</span>
+          </div>
+          <button type="button" className="tutorial-close" onClick={finish} aria-label="Close tutorial">
+            <X aria-hidden="true" />
+          </button>
+        </header>
+
+        <div className="tutorial-stage">
+          <div className="tutorial-copy" key={`copy-${step}`}>
+            <span className={`tutorial-eyebrow tutorial-tone--${current.tone}`}>{current.eyebrow}</span>
+            <h2 id="tutorial-title">{current.title}</h2>
+            <p>{current.description}</p>
+            <div className="tutorial-note">
+              <span className="tutorial-note__dot" />
+              {current.note}
+            </div>
+          </div>
+
+          <div className={`tutorial-visual tutorial-visual--${current.tone}`} key={`visual-${step}`} aria-hidden="true">
+            <div className="tutorial-orbit tutorial-orbit--outer" />
+            <div className="tutorial-orbit tutorial-orbit--inner" />
+            <div className="tutorial-node tutorial-node--a" />
+            <div className="tutorial-node tutorial-node--b" />
+            <div className="tutorial-node tutorial-node--c" />
+            <div className="tutorial-connector tutorial-connector--a" />
+            <div className="tutorial-connector tutorial-connector--b" />
+            <div className="tutorial-core">
+              <CurrentIcon />
+            </div>
+            <span className="tutorial-visual__label">VERIFIED FLOW / 0{step + 1}</span>
+          </div>
+        </div>
+
+        <footer className="tutorial-footer">
+          <div className="tutorial-progress" aria-label={`Step ${step + 1} of ${tutorialSteps.length}`}>
+            {tutorialSteps.map((item, index) => (
+              <button
+                key={item.eyebrow}
+                type="button"
+                className={index === step ? 'is-active' : ''}
+                onClick={() => setStep(index)}
+                aria-label={`Go to step ${index + 1}`}
+                aria-current={index === step ? 'step' : undefined}
+              >
+                <span>{String(index + 1).padStart(2, '0')}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="tutorial-actions">
+            <button type="button" className="tutorial-skip" onClick={finish}>
+              Skip guide
+            </button>
+            {step > 0 && (
+              <button type="button" className="tutorial-back" onClick={() => setStep(step - 1)}>
+                <ArrowLeft aria-hidden="true" />
+                Back
+              </button>
+            )}
+            {step < tutorialSteps.length - 1 ? (
+              <button type="button" className="tutorial-next" onClick={() => setStep(step + 1)}>
+                Continue
+                <ArrowRight aria-hidden="true" />
+              </button>
+            ) : (
+              <button type="button" className="tutorial-next" onClick={finish}>
+                Enter the desk
+                <ArrowRight aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   // Navigation & Network Mode
   const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
+  const [isTutorialOpen, setIsTutorialOpen] = useState(
+    () => localStorage.getItem(TUTORIAL_STORAGE_KEY) !== 'true'
+  );
   
   // Get initial networkMode from URL query params or environment variables immediately
   const getInitialNetworkMode = (): 'mainnet' | 'regtest' => {
@@ -2234,6 +2410,8 @@ export default function App() {
 
   return (
     <div className="app-shell min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+      <TutorialCarousel open={isTutorialOpen} onClose={() => setIsTutorialOpen(false)} />
+
       {/* Toast Notification */}
       {toast && (
         <div className={`fixed top-5 right-5 z-50 px-4 py-3 rounded-lg shadow-2xl flex items-center gap-3 border transition-all duration-300 ${
@@ -2268,6 +2446,16 @@ export default function App() {
 
           {/* Network Toggle Button and Stats */}
           <div className="flex flex-wrap items-center justify-start md:justify-end gap-3 sm:gap-6">
+            <button
+              type="button"
+              className="tutorial-launcher"
+              onClick={() => setIsTutorialOpen(true)}
+              aria-label="Open the first-run guide"
+            >
+              <HelpCircle aria-hidden="true" />
+              <span>How it works</span>
+            </button>
+
             {!isNetworkLocked ? (
               <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-850">
                 <button
