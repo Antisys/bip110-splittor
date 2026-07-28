@@ -14,6 +14,7 @@ export async function runMigrations(): Promise<void> {
                 hashLock TEXT NOT NULL,
                 lockTime INTEGER NOT NULL,
                 secondLockTime INTEGER,
+                lockTimeOffset INTEGER,
                 b110HtlcAddress TEXT,
                 btcHtlcAddress TEXT,
                 b110HtlcTxid TEXT,
@@ -33,6 +34,7 @@ export async function runMigrations(): Promise<void> {
         `);
         const additiveColumns = [
             ['secondLockTime', 'INTEGER'],
+            ['lockTimeOffset', 'INTEGER'],
             ['b110HtlcVout', 'INTEGER'],
             ['btcHtlcVout', 'INTEGER']
             ,['initiatorSettlementTxid', 'TEXT']
@@ -42,6 +44,7 @@ export async function runMigrations(): Promise<void> {
             try { await dbRun(`ALTER TABLE offers ADD COLUMN ${name} ${type}`); }
             catch (err: any) { if (!String(err.message).includes('duplicate column name')) throw err; }
         }
+        await dbRun(`UPDATE offers SET lockTimeOffset = 1008 WHERE lockTimeOffset IS NULL`);
         console.log("[MIGRATION] Migration checks complete. Offers table verified.");
     } catch (err: any) {
         console.error("[MIGRATION] Critical schema migration failure:", err.message);

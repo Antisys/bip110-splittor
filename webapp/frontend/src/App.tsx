@@ -7,6 +7,7 @@ import { PureBitcoinSwap } from './lib/PureBitcoinSwap';
 import { buildOutpointSet, classifyOutpoint, outpointKey } from '../../../src/lib/utxoClassification';
 import { selectFundingUtxos } from '../../../src/lib/fundingSelection';
 import type { FundingFeeEstimator } from '../../../src/lib/fundingSelection';
+import { deadlineFromHeight, secondLockTimeOffset, validateLockTimeOffset } from '../../../src/lib/timelocks';
 import { 
   Wallet, 
   Coins, 
@@ -123,6 +124,7 @@ interface Offer {
   hashLock: string;
   lockTime: number;
   secondLockTime: number;
+  lockTimeOffset: number;
   b110HtlcAddress?: string;
   btcHtlcAddress?: string;
   b110HtlcTxid?: string;
@@ -263,6 +265,11 @@ export default function App() {
     return networkMode === 'mainnet' ? bitcoin.networks.bitcoin : bitcoin.networks.regtest;
   };
 
+  const getFreshChainHeight = async (chain: 'main' | 'bip110'): Promise<number> => {
+    const response = await axios.get(`${API_BASE}/node/info`);
+    return chain === 'main' ? response.data.mainHeight : response.data.bip110Height;
+  };
+
   const getSecondHtlcLockTime = (offer: Offer, network: bitcoin.Network): number => {
     const intendedLockTime = offer.secondLockTime;
     const secondHtlcAddress = offer.backingChain === 'main' ? offer.b110HtlcAddress : offer.btcHtlcAddress;
@@ -297,6 +304,18 @@ export default function App() {
     
     const hours = ((blocksRemaining * 10) / 60).toFixed(1);
     return `Block #${targetHeight} (~${blocksRemaining} blks remaining / ~${hours} hrs)`;
+  };
+
+  const formatOfferLockTime = (offer: Offer, second = false): string => {
+    const deadline = second ? offer.secondLockTime : offer.lockTime;
+    if (!deadline) {
+      const offset = second ? secondLockTimeOffset(offer.lockTimeOffset) : offer.lockTimeOffset;
+      return `Set at funding (+${offset} blocks)`;
+    }
+    const chain = second
+      ? (offer.backingChain === 'main' ? 'bip110' : 'main')
+      : (offer.backingChain || 'main');
+    return formatLockTimeDisplay(deadline, false, chain);
   };
 
   const allMainUtxos = React.useMemo(
@@ -1756,24 +1775,14 @@ export default function App() {
       const hashBuffer = await window.crypto.subtle.digest('SHA-256', preimageBytes as any);
       const hashLockHex = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 
-      const baseHeight = backingChain === 'main' ? nodeInfo.mainHeight : nodeInfo.bip110Height;
-      const secondBaseHeight = backingChain === 'main' ? nodeInfo.bip110Height : nodeInfo.mainHeight;
-      if (!baseHeight || baseHeight <= 0) {
-        throw new Error(`Cannot determine current block height for ${backingChain === 'main' ? 'Bitcoin' : 'BIP110'} chain. Please wait for node info to sync.`);
-      }
-      if (!secondBaseHeight || secondBaseHeight <= 0) throw new Error('Cannot determine the counter-chain height.');
-      const duration = Number(newOfferLocktime);
-      if (!Number.isSafeInteger(duration) || duration < 2) throw new Error('Lock duration must be at least two blocks.');
-      const absoluteLockTime = baseHeight + duration;
-      const secondLockTime = secondBaseHeight + Math.floor(duration / 2);
+      const lockTimeOffset = validateLockTimeOffset(newOfferLocktime);
 
       const res = await axios.post(`${API_BASE}/offers`, {
         initiatorPubKey: publicKey,
         initiatorB110Amount: Number(newOfferB110),
         acceptorBtcAmount: Number(newOfferBtc),
         hashLock: hashLockHex,
-        lockTime: absoluteLockTime,
-        secondLockTime,
+        lockTimeOffset,
         networkMode,
         backingTxid,
         backingVout,
@@ -1844,6 +1853,8 @@ export default function App() {
         const targetAmount = isBtcBacking ? selectedOffer.acceptorBtcAmount : selectedOffer.initiatorB110Amount;
         const coordinatorFees = await getCoordinatorFees();
         const coordinatorFee = coordinatorFeeSats(targetAmount, coordinatorFees.makerFeePercent);
+        const currentHeight = await getFreshChainHeight(targetChain);
+        const firstHtlcLockTime = deadlineFromHeight(currentHeight, validateLockTimeOffset(selectedOffer.lockTimeOffset));
 
         showToast(`Building ${targetChain === 'main' ? 'BTC' : 'B110'} HTLC contract locally...`, 'info');
         
@@ -1856,7 +1867,7 @@ export default function App() {
           Buffer.from(selectedOffer.hashLock, 'hex'),
           recipientPubKey,
           refundPubKey,
-          selectedOffer.lockTime,
+          firstHtlcLockTime,
           net
         );
 
@@ -1915,7 +1926,8 @@ export default function App() {
 
         // 5. Update Offer State on server
         const updateParams: any = {
-          status: 'FUNDED_INITIATOR'
+          status: 'FUNDED_INITIATOR',
+          lockTime: firstHtlcLockTime
         };
         if (isBtcBacking) {
           updateParams.btcHtlcAddress = htlc.address!;
@@ -1970,7 +1982,11 @@ export default function App() {
         // 1. Generate second HTLC outputs locally
         const secondHtlcRecipient = Buffer.from(selectedOffer.initiatorPubKey, 'hex');
         const secondHtlcRefund = Buffer.from(selectedOffer.acceptorPubKey!, 'hex');
-        const secondHtlcLockTime = selectedOffer.secondLockTime;
+        const currentHeight = await getFreshChainHeight(targetChain);
+        const secondHtlcLockTime = deadlineFromHeight(
+          currentHeight,
+          secondLockTimeOffset(validateLockTimeOffset(selectedOffer.lockTimeOffset))
+        );
 
         const htlc = PureBitcoinSwap.createTaprootHtlc(
           Buffer.from(selectedOffer.initiatorPubKey, 'hex'),
@@ -2022,7 +2038,8 @@ export default function App() {
 
         // 5. Update Offer State on server
         const updateParams: any = {
-          status: 'FUNDED_ACCEPTOR'
+          status: 'FUNDED_ACCEPTOR',
+          secondLockTime: secondHtlcLockTime
         };
         if (targetChain === 'main') {
           updateParams.btcHtlcAddress = htlc.address!;
@@ -3526,7 +3543,7 @@ export default function App() {
                             <div className="flex justify-between">
                               <span className="text-slate-500 font-medium">Refund Locktime (T):</span>
                               <span className="font-semibold text-amber-500">
-                                {formatLockTimeDisplay(o.lockTime, false, o.backingChain || 'main')}
+                                {formatOfferLockTime(o)}
                               </span>
                             </div>
                             <div className="flex justify-between">
@@ -3650,7 +3667,7 @@ export default function App() {
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Refund Locktime (T):</span>
                             <span className="font-semibold text-amber-500">
-                              {formatLockTimeDisplay(o.lockTime, false, o.backingChain || 'main')}
+                              {formatOfferLockTime(o)}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -3747,7 +3764,7 @@ export default function App() {
                           <div className="flex justify-between">
                             <span className="text-slate-500 font-medium">Refund Locktime (T/2):</span>
                             <span className="font-semibold text-amber-500">
-                              {formatLockTimeDisplay(o.secondLockTime, false, o.backingChain === 'main' ? 'bip110' : 'main')}
+                              {formatOfferLockTime(o, true)}
                             </span>
                           </div>
                           <div className="flex justify-between">
@@ -3829,7 +3846,7 @@ export default function App() {
                     <div className="bg-slate-950 border border-slate-850 px-4 py-2.5 rounded-xl text-center">
                       <span className="text-[10px] text-slate-500 uppercase block font-semibold">Refund Height (T / T/2)</span>
                       <span className="text-sm font-bold text-amber-500">
-                        #{selectedOffer.lockTime} / #{selectedOffer.secondLockTime}
+                        {selectedOffer.lockTime ? `#${selectedOffer.lockTime}` : `+${selectedOffer.lockTimeOffset} blocks`} / {selectedOffer.secondLockTime ? `#${selectedOffer.secondLockTime}` : `+${secondLockTimeOffset(selectedOffer.lockTimeOffset)} blocks`}
                       </span>
                     </div>
                   </div>

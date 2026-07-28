@@ -10,6 +10,7 @@ export interface DbOffer {
     hashLock: string;
     lockTime: number;
     secondLockTime?: number | null;
+    lockTimeOffset: number;
     b110HtlcAddress?: string | null;
     btcHtlcAddress?: string | null;
     b110HtlcTxid?: string | null;
@@ -118,8 +119,7 @@ export async function insertOffer(offer: {
     initiatorB110Amount: number;
     acceptorBtcAmount: number;
     hashLock: string;
-    lockTime: number;
-    secondLockTime: number;
+    lockTimeOffset: number;
     networkMode: 'mainnet' | 'regtest';
     backingTxid?: string | null;
     backingVout?: number | null;
@@ -129,12 +129,12 @@ export async function insertOffer(offer: {
     await dbRun(`
         INSERT INTO offers (
             id, status, initiatorPubKey, initiatorB110Amount, acceptorPubKey, acceptorBtcAmount,
-            hashLock, lockTime, secondLockTime, b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, b110HtlcVout, btcHtlcVout,
+            hashLock, lockTime, secondLockTime, lockTimeOffset, b110HtlcAddress, btcHtlcAddress, b110HtlcTxid, btcHtlcTxid, b110HtlcVout, btcHtlcVout,
             initiatorSettlementTxid, acceptorSettlementTxid, preimage, networkMode, createdAt, backingTxid, backingVout, backingChain, acceptorClaimed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     `, [
         offer.id, 'OPEN', offer.initiatorPubKey, offer.initiatorB110Amount, null, offer.acceptorBtcAmount,
-        offer.hashLock, offer.lockTime, offer.secondLockTime, null, null, null, null, null, null,
+        offer.hashLock, 0, null, offer.lockTimeOffset, null, null, null, null, null, null,
         null, null, null, offer.networkMode, createdAt, offer.backingTxid || null,
         offer.backingVout !== undefined ? offer.backingVout : null, offer.backingChain || null
     ]);
@@ -155,7 +155,7 @@ export async function updateOfferFieldsById(id: string, fields: Partial<DbOffer>
     const allowedKeys: (keyof DbOffer)[] = [
         'status', 'acceptorPubKey', 'b110HtlcAddress', 'btcHtlcAddress',
         'b110HtlcTxid', 'btcHtlcTxid', 'b110HtlcVout', 'btcHtlcVout', 'initiatorSettlementTxid',
-        'acceptorSettlementTxid', 'preimage', 'acceptorClaimed'
+        'acceptorSettlementTxid', 'preimage', 'acceptorClaimed', 'lockTime', 'secondLockTime'
     ];
 
     for (const key of allowedKeys) {

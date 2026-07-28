@@ -9,6 +9,7 @@ import { assertCoordinatorFee, loadCoordinatorFeeConfig } from './coordinatorFee
 import { randomUUID } from 'crypto';
 import { logError, logInfo, logWarn } from './logger';
 import { PureBitcoinSwap } from '../../src/lib/PureBitcoinSwap';
+import { MIN_CROSS_CHAIN_SAFETY_BLOCKS, assertFundingDeadline, secondLockTimeOffset, validateLockTimeOffset } from '../../src/lib/timelocks';
 import { cachedExplorerRead, closeCache } from './cache';
 
 import { runMigrations } from './database/migrations';
@@ -395,6 +396,16 @@ function cachedProductionRead<T>(
     }, ttlSeconds, loader);
 }
 
+async function currentChainHeight(chain: ExplorerChain): Promise<number> {
+    if (NETWORK_MODE === 'regtest') {
+        return (chain === 'main' ? mainMinerRpc : bip110MinerRpc).call('getblockcount');
+    }
+    return cachedProductionRead(chain, 'chain-tip', {}, EXPLORER_CACHE_TTL.tip, async () => {
+        const rpc = getProductionRpc(chain);
+        return rpc ? rpc.call('getblockcount') : getMainnetExplorer(chain).getTipHeight();
+    });
+}
+
 async function getProductionUtxos(chain: ExplorerChain, address: string) {
     const rpc = getProductionRpc(chain, true);
     if (!rpc) return getMainnetExplorer(chain).getAddressUtxos(address);
@@ -605,22 +616,22 @@ app.get('/api/offers', async (req: Request, res: Response) => {
 
 // 2. Create a Marketplace Offer
 app.post('/api/offers', async (req: Request, res: Response) => {
-    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTime, secondLockTime, backingTxid, backingVout, backingChain } = req.body;
+    const { initiatorPubKey, initiatorB110Amount, acceptorBtcAmount, hashLock, lockTimeOffset, backingTxid, backingVout, backingChain } = req.body;
 
-    if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || !lockTime || !secondLockTime) {
+    if (!initiatorPubKey || !initiatorB110Amount || !acceptorBtcAmount || !hashLock || lockTimeOffset === undefined) {
         return res.status(400).json({ error: "Missing required parameters" });
     }
 
     const b110Amount = Number(initiatorB110Amount);
     const btcAmount = Number(acceptorBtcAmount);
-    const firstDeadline = Number(lockTime);
-    const secondDeadline = Number(secondLockTime);
+    let agreedOffset: number;
+    try { agreedOffset = validateLockTimeOffset(lockTimeOffset); }
+    catch (error: any) { return res.status(400).json({ error: error.message }); }
     if (!/^(02|03)[0-9a-f]{64}$/i.test(initiatorPubKey) || !/^[0-9a-f]{64}$/i.test(hashLock)) {
         return res.status(400).json({ error: 'Invalid initiator public key or hash lock' });
     }
-    if (![b110Amount, btcAmount, firstDeadline, secondDeadline].every(Number.isSafeInteger)
-        || b110Amount <= 0 || btcAmount <= 0 || secondDeadline <= 0 || firstDeadline <= secondDeadline) {
-        return res.status(400).json({ error: 'Amounts and deadlines must be positive safe integers, with the initiator deadline after the acceptor deadline' });
+    if (![b110Amount, btcAmount].every(Number.isSafeInteger) || b110Amount <= 0 || btcAmount <= 0) {
+        return res.status(400).json({ error: 'Amounts must be positive safe integers' });
     }
     if (!/^[0-9a-f]{64}$/i.test(backingTxid || '') || !Number.isSafeInteger(Number(backingVout)) || Number(backingVout) < 0
         || (backingChain !== 'main' && backingChain !== 'bip110')) {
@@ -638,8 +649,7 @@ app.post('/api/offers', async (req: Request, res: Response) => {
             initiatorB110Amount: b110Amount,
             acceptorBtcAmount: btcAmount,
             hashLock,
-            lockTime: firstDeadline,
-            secondLockTime: secondDeadline,
+            lockTimeOffset: agreedOffset,
             networkMode: NETWORK_MODE,
             backingTxid: backingTxid || null,
             backingVout: backingVout !== undefined ? Number(backingVout) : null,
@@ -786,6 +796,8 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
         const chainFields = chain === 'main'
             ? ['status', 'btcHtlcAddress', 'btcHtlcTxid', 'btcHtlcVout']
             : ['status', 'b110HtlcAddress', 'b110HtlcTxid', 'b110HtlcVout'];
+        if (signer === 'initiator') chainFields.push('lockTime');
+        else chainFields.push('secondLockTime');
         let permitted: string[] = [];
         if (signer === 'initiator' && offer.status === 'ACCEPTED' && fields.status === 'FUNDED_INITIATOR') permitted = chainFields;
         else if (signer === 'acceptor' && offer.status === 'FUNDED_INITIATOR' && fields.status === 'FUNDED_ACCEPTOR') permitted = chainFields;
@@ -844,6 +856,21 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
                 return res.status(400).json({ error: 'Invalid HTLC funding transaction id' });
             }
             try {
+                const agreedOffset = validateLockTimeOffset(offer.lockTimeOffset);
+                const height = await currentChainHeight(fundingChain);
+                const submittedDeadline = signer === 'initiator' ? Number(fields.lockTime) : Number(fields.secondLockTime);
+                const roleOffset = signer === 'initiator' ? agreedOffset : secondLockTimeOffset(agreedOffset);
+                try { assertFundingDeadline(height, submittedDeadline, roleOffset); }
+                catch (error: any) { return res.status(400).json({ error: `${fundingChain} ${error.message}` }); }
+                if (signer === 'acceptor') {
+                    if (!offer.lockTime) return res.status(400).json({ error: 'The first HTLC has no committed deadline' });
+                    const firstHeight = await currentChainHeight(offer.backingChain!);
+                    const firstRemaining = offer.lockTime - firstHeight;
+                    const secondRemaining = submittedDeadline - height;
+                    if (firstRemaining < secondRemaining + MIN_CROSS_CHAIN_SAFETY_BLOCKS) {
+                        return res.status(400).json({ error: `Insufficient cross-chain safety window: require at least ${MIN_CROSS_CHAIN_SAFETY_BLOCKS} blocks` });
+                    }
+                }
                 const rawTransaction = await getRawTransaction(fundingTxid, fundingChain);
                 const transaction = bitcoin.Transaction.fromHex(rawTransaction);
                 if (transaction.getId().toLowerCase() !== fundingTxid.toLowerCase()) {
@@ -864,7 +891,7 @@ app.post('/api/offers/:id/update', async (req: Request, res: Response) => {
                 const isFirstHtlc = signer === 'initiator';
                 const recipient = Buffer.from(isFirstHtlc ? offer.acceptorPubKey! : offer.initiatorPubKey, 'hex');
                 const refund = Buffer.from(isFirstHtlc ? offer.initiatorPubKey : offer.acceptorPubKey!, 'hex');
-                const deadline = isFirstHtlc ? offer.lockTime : offer.secondLockTime;
+                const deadline = submittedDeadline;
                 if (!deadline) return res.status(400).json({ error: 'Offer is missing its committed HTLC deadline' });
                 const expectedAddress = PureBitcoinSwap.createTaprootHtlc(
                     Buffer.from(offer.initiatorPubKey, 'hex'), Buffer.from(offer.hashLock, 'hex'),
