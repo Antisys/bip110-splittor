@@ -39,6 +39,7 @@ import {
   ArrowLeft,
   ArrowRight,
   GitFork,
+  Github,
   Handshake,
   HelpCircle,
   KeyRound,
@@ -157,40 +158,56 @@ interface CoordinatorFees {
   receiveAddress: string;
 }
 
-const TUTORIAL_STORAGE_KEY = 'bip110swap_tutorial_seen_v1';
+const TUTORIAL_STORAGE_KEY = 'bip110swap_tutorial_seen_v2';
 
 const tutorialSteps = [
   {
-    eyebrow: '01 / LOCAL CUSTODY',
-    title: 'Your keys stay in this browser.',
-    description: 'Create or import a wallet to derive addresses for both chains. Signing happens locally; the coordinator never receives your private key.',
-    note: 'One keyspace · two chain views',
-    icon: KeyRound,
+    eyebrow: '01 / WHAT THIS PORTAL DOES',
+    title: 'Your coins may exist on both chains.',
+    description: 'If you held bitcoin before the August BIP-110 fork, the same coins may now be spendable on both Bitcoin and BIP110. This site helps you separate them safely, sell off the side you don’t want to hodl, and withdraw your funds.',
+    note: 'Split first · swap second · keep custody',
+    icon: Handshake,
     tone: 'orange'
   },
   {
-    eyebrow: '02 / CHAIN SEPARATION',
-    title: 'Split once. Spend independently.',
-    description: 'The splitter classifies your outputs and prepares replay-protected UTXOs, so BTC and BIP110 balances can move without replaying across the fork.',
-    note: 'BTC output ↗  BIP110 output ↘',
-    icon: GitFork,
+    eyebrow: '02 / CREATE, BACK UP & DEPOSIT',
+    title: 'Fund your unified deposit address.',
+    description: 'Open “1. Unified Wallet,” create or import your wallet, and download the recovery backup. Copy the highlighted Deposit destination and send your initial unsplit coins there—do not use the later split destination.',
+    note: 'Unified Wallet → Deposit destination',
+    icon: KeyRound,
     tone: 'cyan'
   },
   {
-    eyebrow: '03 / OFFER DESK',
-    title: 'Choose a chain, not every coin.',
-    description: 'Set the amount and publish or accept an offer. The wallet automatically selects enough eligible UTXOs and calculates the change output and network fee.',
-    note: 'Amount → selection → change',
-    icon: Handshake,
+    eyebrow: '03 / SPLIT THE DEPOSIT',
+    title: 'Make each chain independently spendable.',
+    description: 'After the deposit confirms, open “2. Bilateral Splitter.” Select a confirmed unsplit UTXO and press “Split Coins.” Wait for confirmation before using the resulting BTC or BIP110 balance.',
+    note: 'Bilateral Splitter → select UTXO → Split Coins',
+    icon: GitFork,
     tone: 'lime'
   },
   {
-    eyebrow: '04 / ATOMIC SETTLEMENT',
-    title: 'Either both sides settle—or refund.',
-    description: 'Hashlocked transactions coordinate the swap. The secret unlocks both claims; if settlement stops, each party recovers funds after its agreed block offset.',
-    note: 'Hashlock first · timelock fallback',
-    icon: TimerReset,
+    eyebrow: '04 / CREATE OR ACCEPT AN OFFER',
+    title: 'Trade from your split balance.',
+    description: 'In “3. Marketplace Lobby,” publish by choosing the chain you are selling, the amount, and pricing adjustment—or review the Public Marketplace and accept another offer. Funding UTXOs and change are selected automatically.',
+    note: 'Marketplace Lobby → Publish or Accept',
+    icon: Handshake,
     tone: 'amber'
+  },
+  {
+    eyebrow: '05 / COMPLETE THE SWAP',
+    title: 'Complete the swap.',
+    description: 'Open “4. My Swaps & Offers,” select the active trade, then use “5. Swap Wizard.” Complete only the action assigned to your role: fund, verify, claim, or wait for the counterparty.',
+    note: 'My Swaps & Offers → Swap Wizard',
+    icon: TimerReset,
+    tone: 'orange'
+  },
+  {
+    eyebrow: '06 / WITHDRAW',
+    title: 'Send unlocked funds to your own address.',
+    description: 'Return to “1. Unified Wallet” and open “Withdraw Unlocked Funds.” Choose the BTC or BIP110 source UTXO, enter a destination and amount, review the selected chain, then broadcast the withdrawal.',
+    note: 'Unified Wallet → Withdraw Unlocked Funds',
+    icon: Wallet,
+    tone: 'cyan'
   }
 ] as const;
 
@@ -2680,7 +2697,6 @@ export default function App() {
 
                   <div className="shrink-0 rounded-xl border border-sky-500/20 bg-sky-950/20 px-4 py-3 text-xs text-sky-200 lg:max-w-xs">
                     <span className="block font-bold">Same address on both fork chains</span>
-                    <span className="mt-1 block text-[11px] leading-relaxed text-slate-400">Do not use the later “split destination” as your initial deposit address.</span>
                   </div>
                 </div>
 
@@ -4514,9 +4530,19 @@ export default function App() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-900 py-6 bg-slate-950 text-xs text-slate-500 text-center mt-auto">
-        <div className="max-w-7xl mx-auto px-6">
+      <footer className="site-footer border-t border-slate-900 py-6 bg-slate-950 text-xs text-slate-500 mt-auto">
+        <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <p>© 2026 BIP110 Double-Sided Replay-Protected Swap Portal. Standard Taproot Script Leaves on Bitcoin Core & Knots nodes.</p>
+          <a
+            href="https://github.com/a1denvalu3/bip110-splittor"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="site-footer__source"
+          >
+            <Github aria-hidden="true" />
+            <span>View source on GitHub</span>
+            <ExternalLink aria-hidden="true" />
+          </a>
         </div>
       </footer>
     </div>
