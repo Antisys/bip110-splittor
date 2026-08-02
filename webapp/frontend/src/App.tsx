@@ -403,8 +403,19 @@ export default function App() {
   const [nodeInfo, setNodeInfo] = useState<{
     mainHeight: number;
     bip110Height: number;
+    bip110Activation: {
+      ready: boolean;
+      status: string;
+      activationHeight: number | null;
+      requiredHeight: number | null;
+      source: 'rpc' | 'height-fallback' | 'unavailable';
+    };
     errors?: { main?: string; bip110?: string };
-  }>({ mainHeight: 0, bip110Height: 0 });
+  }>({
+    mainHeight: 0,
+    bip110Height: 0,
+    bip110Activation: { ready: false, status: 'checking', activationHeight: null, requiredHeight: null, source: 'unavailable' }
+  });
   const [selectedUtxoToSplit, setSelectedUtxoToSplit] = useState<UTXO | null>(null);
   const [splittingBilateral, setSplittingBilateral] = useState<boolean>(false);
   const [bilateralSplitResult, setBilateralSplitResult] = useState<{
@@ -1475,9 +1486,18 @@ export default function App() {
   const fetchNodeInfo = async () => {
     try {
       const res = await axios.get(`${API_BASE}/node/info`);
-      setNodeInfo({ mainHeight: res.data.mainHeight, bip110Height: res.data.bip110Height, errors: res.data.errors });
+      setNodeInfo({
+        mainHeight: res.data.mainHeight,
+        bip110Height: res.data.bip110Height,
+        bip110Activation: res.data.bip110Activation ?? { ready: false, status: 'unavailable', activationHeight: null, requiredHeight: null, source: 'unavailable' },
+        errors: res.data.errors
+      });
     } catch (err: any) {
-      setNodeInfo({ mainHeight: 0, bip110Height: 0 });
+      setNodeInfo({
+        mainHeight: 0,
+        bip110Height: 0,
+        bip110Activation: { ready: false, status: 'unavailable', activationHeight: null, requiredHeight: null, source: 'unavailable' }
+      });
       console.error(err);
     }
   };
@@ -2423,7 +2443,9 @@ export default function App() {
   };
 
   const blockLead = nodeInfo.mainHeight - nodeInfo.bip110Height;
-  const isLockoutActive = nodeInfo.mainHeight > 0 && nodeInfo.bip110Height > 0 && blockLead > 0 && blockLead < 10;
+  const isActivationLockout = !nodeInfo.bip110Activation.ready;
+  const isWorkLeadLockout = nodeInfo.mainHeight > 0 && nodeInfo.bip110Height > 0 && blockLead > 0 && blockLead < 10;
+  const isLockoutActive = isActivationLockout || isWorkLeadLockout;
 
   return (
     <div className="app-shell min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -2529,7 +2551,8 @@ export default function App() {
                   </div>
                   <button
                     onClick={() => mineBlocks('main', 1)}
-                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all self-end"
+                    disabled={isLockoutActive}
+                    className="px-2 py-1 text-[10px] font-bold text-emerald-400 hover:text-emerald-300 bg-emerald-950/30 hover:bg-emerald-900/40 border border-emerald-900/40 hover:border-emerald-500 rounded-md transition-all self-end disabled:opacity-35 disabled:cursor-not-allowed"
                     title="Mine 1 Block on Bitcoin Core Regtest"
                   >
                     +1 Block
@@ -2544,7 +2567,8 @@ export default function App() {
                   </div>
                   <button
                     onClick={() => mineBlocks('bip110', 1)}
-                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all self-end"
+                    disabled={isLockoutActive}
+                    className="px-2 py-1 text-[10px] font-bold text-sky-400 hover:text-sky-300 bg-sky-950/30 hover:bg-sky-900/40 border border-sky-900/40 hover:border-sky-500 rounded-md transition-all self-end disabled:opacity-35 disabled:cursor-not-allowed"
                     title="Mine 1 Block on BIP110 Knots Regtest"
                   >
                     +1 Block
@@ -2599,11 +2623,12 @@ export default function App() {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
+                disabled={isLockoutActive}
                 className={`workflow-tab py-4 px-6 font-medium text-sm flex items-center gap-2 border-b-2 transition-all shrink-0 ${
                   activeTab === tab.id 
                     ? 'workflow-tab--active border-indigo-500 text-indigo-400'
                     : 'border-transparent text-slate-400 hover:text-slate-200'
-                }`}
+                } disabled:opacity-35 disabled:cursor-not-allowed`}
               >
                 <Icon className="w-4 h-4" />
                 {tab.label}
@@ -2624,10 +2649,16 @@ export default function App() {
             
             <div className="space-y-2">
               <h2 className="text-xl md:text-2xl font-bold tracking-tight text-amber-300">
-                Consensus Safety Lockout: Insufficient Main-Chain Work Advantage
+                {isActivationLockout
+                  ? 'BIP110 Consensus Rules Are Not Active Yet'
+                  : 'Consensus Safety Lockout: Insufficient Main-Chain Work Advantage'}
               </h2>
               <p className="text-sm text-slate-400 max-w-xl mx-auto leading-relaxed">
-                BIP110 Knots enforces a strict subset of Bitcoin Core consensus rules. Since any block produced by a BIP110 node is automatically valid on the Main-Chain, the Core chain must maintain at least a <strong className="text-amber-400">10-block lead</strong> to prevent reorg, block replay, or chain separation vulnerabilities.
+                {isActivationLockout ? (
+                  <>Deposits, wallet actions, splitting, offers, and swaps are disabled until the connected Knots node reports the <strong className="text-amber-400">reduced_data deployment as ACTIVE</strong>. Miner signaling or LOCKED_IN status alone does not enforce BIP110's consensus rules.</>
+                ) : (
+                  <>BIP110 Knots enforces a strict subset of Bitcoin Core consensus rules. Since any block produced by a BIP110 node is automatically valid on the Main-Chain, the Core chain must maintain at least a <strong className="text-amber-400">10-block lead</strong> to prevent reorg, block replay, or chain separation vulnerabilities.</>
+                )}
               </p>
             </div>
 
@@ -2641,14 +2672,27 @@ export default function App() {
                 <span className="text-md font-extrabold text-sky-400 font-mono">{nodeInfo.bip110Height} blocks</span>
               </div>
               <div className="col-span-2 sm:col-span-1 bg-slate-950/80 border border-amber-950/40 px-4 py-3 rounded-xl flex flex-col justify-center">
-                <span className="text-[10px] text-amber-500/80 uppercase block font-bold mb-0.5">Current Lead</span>
-                <span className={`text-md font-extrabold font-mono ${nodeInfo.mainHeight - nodeInfo.bip110Height >= 10 ? 'text-emerald-400' : 'text-rose-400 animate-pulse'}`}>
-                  {nodeInfo.mainHeight - nodeInfo.bip110Height} / 10
+                <span className="text-[10px] text-amber-500/80 uppercase block font-bold mb-0.5">{isActivationLockout ? 'Deployment State' : 'Current Lead'}</span>
+                <span className={`text-md font-extrabold font-mono ${!isActivationLockout && nodeInfo.mainHeight - nodeInfo.bip110Height >= 10 ? 'text-emerald-400' : 'text-rose-400 animate-pulse'}`}>
+                  {isActivationLockout ? nodeInfo.bip110Activation.status.toUpperCase() : `${nodeInfo.mainHeight - nodeInfo.bip110Height} / 10`}
                 </span>
               </div>
             </div>
 
-            {networkMode === 'regtest' ? (
+            {isActivationLockout && networkMode === 'regtest' ? (
+              <div className="pt-6 w-full max-w-xs">
+                <button
+                  onClick={() => mineBlocks('bip110', 450)}
+                  className="w-full py-3 bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white font-semibold text-sm rounded-xl shadow-xl shadow-indigo-600/10 transition-all flex items-center justify-center gap-2 group"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-300 group-hover:scale-110 transition-transform animate-pulse" />
+                  Mine 450 Blocks to Activate
+                </button>
+                <span className="text-[10px] text-slate-500 block mt-2.5 leading-normal">
+                  Regtest only: advance both connected chains through the deployment periods, then re-check Knots' consensus state.
+                </span>
+              </div>
+            ) : networkMode === 'regtest' ? (
               <div className="pt-6 w-full max-w-xs">
                 <button
                   onClick={() => mineBlocks('main', 10)}
@@ -2660,6 +2704,13 @@ export default function App() {
                 <span className="text-[10px] text-slate-500 block mt-2.5 leading-normal">
                   Click to instantly mine 10 blocks on Core via local RPC, establishing the required work advantage and unlocking the portal.
                 </span>
+              </div>
+            ) : isActivationLockout ? (
+              <div className="pt-6 bg-slate-950/40 border border-slate-800 p-4 rounded-2xl max-w-lg text-xs text-slate-400 leading-relaxed">
+                <strong className="text-amber-400">Fail-closed safety hold.</strong>{' '}
+                {nodeInfo.bip110Activation.requiredHeight
+                  ? `Knots is at block ${nodeInfo.bip110Height.toLocaleString()}. Explorer-only verification remains locked until the guaranteed activation height ${nodeInfo.bip110Activation.requiredHeight.toLocaleString()}.`
+                  : 'The backend cannot verify the Knots deployment state. Connect a reachable BIP110 RPC node to unlock from its authoritative consensus state.'}
               </div>
             ) : (
               <div className="pt-6 bg-slate-950/40 border border-slate-800 p-4 rounded-2xl max-w-md text-xs text-slate-400 leading-relaxed">

@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import { logError, logInfo, logWarn } from './logger';
 import { PureBitcoinSwap } from '../../src/lib/PureBitcoinSwap';
 import { MIN_CROSS_CHAIN_SAFETY_BLOCKS, assertFundingDeadline, secondLockTimeOffset, validateLockTimeOffset } from '../../src/lib/timelocks';
+import { activationFromBlockchainInfo, mainnetHeightFallback, unavailableActivation } from '../../src/lib/bip110Activation';
 import { cachedExplorerRead, closeCache } from './cache';
 
 import { runMigrations } from './database/migrations';
@@ -1263,9 +1264,23 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
             : undefined;
         if (mainError) logWarn('chain_tip.unavailable', { requestId: res.locals.requestId, chain: 'main', error: mainError });
         if (bip110Error) logWarn('chain_tip.unavailable', { requestId: res.locals.requestId, chain: 'bip110', error: bip110Error });
+        let bip110Activation = unavailableActivation();
+        const bip110Rpc = getProductionRpc('bip110');
+        if (bip110Rpc) {
+            try {
+                bip110Activation = activationFromBlockchainInfo(await bip110Rpc.call('getblockchaininfo'));
+            } catch (error: any) {
+                logWarn('bip110.activation_unavailable', { requestId: res.locals.requestId, error: error.message });
+            }
+        } else if (bip110Result.status === 'fulfilled') {
+            // Esplora does not expose versionbits state. The BIP guarantees activation
+            // no later than this height, so stay locked until that conservative bound.
+            bip110Activation = mainnetHeightFallback(bip110Result.value);
+        }
         return res.json({
             mainHeight: mainResult.status === 'fulfilled' ? mainResult.value : 0,
             bip110Height: bip110Result.status === 'fulfilled' ? bip110Result.value : 0,
+            bip110Activation,
             errors: {
                 ...(mainError ? { main: mainError } : {}),
                 ...(bip110Error ? { bip110: bip110Error } : {})
@@ -1275,17 +1290,22 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
 
     // Regtest Mode
     try {
-        const mainHeight = await mainMinerRpc.call('getblockcount');
-        const bip110Height = await bip110MinerRpc.call('getblockcount');
+        const [mainHeight, bip110Height, blockchainInfo] = await Promise.all([
+            mainMinerRpc.call('getblockcount'),
+            bip110MinerRpc.call('getblockcount'),
+            bip110MinerRpc.call('getblockchaininfo')
+        ]);
         res.json({
             mainHeight,
-            bip110Height
+            bip110Height,
+            bip110Activation: activationFromBlockchainInfo(blockchainInfo)
         });
     } catch (err: any) {
         logError('node.info_failed', { requestId: res.locals.requestId, error: err.message });
         res.json({
             mainHeight: 0,
             bip110Height: 0,
+            bip110Activation: unavailableActivation(),
             error: err.message
         });
     }
