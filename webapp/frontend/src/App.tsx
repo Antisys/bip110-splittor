@@ -46,7 +46,12 @@ export default function App() {
       });
     });
 
+    c.onSwapDetails((swapDetails) => {
+      console.log('[SWAP] Received swap details:', swapDetails.swapId);
+    });
+
     c.subscribeOffers();
+    c.subscribeSwapDetails();
   }, [config.relays]);
 
   const initEngine = useCallback(() => {
@@ -80,13 +85,28 @@ export default function App() {
   };
 
   const acceptOffer = async (offer: SwapOffer) => {
-    if (!engine) return;
+    if (!engine || !client) return;
     const swap = engine.initiateSwap(offer.id, offer.side, {
       btc: offer.btcAmount,
       b110: offer.b110Amount,
       network: offer.network
     });
     setSwaps(prev => [swap, ...prev]);
+
+    await client.publishSwapDetails({
+      swapId: swap.id,
+      offerEventId: offer.id,
+      side: swap.side,
+      htlcAddress: swap.htlcAddress!,
+      hashLock: swap.hashLock!,
+      claimPubKey: swap.claimPubKey!,
+      refundPubKey: swap.refundPubKey!,
+      lockTime: swap.lockTime!,
+      network: swap.network!,
+      btcAmount: swap.btcAmount!,
+      b110Amount: swap.b110Amount!
+    });
+
     setTab('swaps');
   };
 

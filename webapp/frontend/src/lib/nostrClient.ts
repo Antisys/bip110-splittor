@@ -25,12 +25,28 @@ export interface SwapOffer {
   sig?: string;
 }
 
+export interface SwapDetails {
+  swapId: string;
+  offerEventId: string;
+  side: 'sell_b110' | 'buy_b110';
+  htlcAddress: string;
+  hashLock: string;
+  claimPubKey: string;
+  refundPubKey: string;
+  lockTime: number;
+  network: string;
+  btcAmount: number;
+  b110Amount: number;
+  createdAt: number;
+}
+
 export class NostrClient {
   private relays: Map<string, WebSocket> = new Map();
   private secretKey: Uint8Array;
   private pubkey: string;
   private relayUrls: string[];
   private offerCallback?: (offer: SwapOffer) => void;
+  private swapCallback?: (swap: SwapDetails) => void;
 
   constructor(relayUrls: string[]) {
     this.relayUrls = relayUrls;
@@ -83,6 +99,10 @@ export class NostrClient {
           const offer = this.parseOffer(event);
           if (offer) this.offerCallback?.(offer);
         }
+        if (event.kind === 1337 && event.tags?.some(t => t[0] === 't' && t[1] === 'bip110-htlc')) {
+          const swap = this.parseSwapDetails(event);
+          if (swap) this.swapCallback?.(swap);
+        }
       } else if (msg[0] === 'OK') {
         const [eventId, success, msg2] = msg.slice(1);
         if (!success) {
@@ -120,6 +140,73 @@ export class NostrClient {
 
   onOffer(callback: (offer: SwapOffer) => void): void {
     this.offerCallback = callback;
+  }
+
+  onSwapDetails(callback: (swap: SwapDetails) => void): void {
+    this.swapCallback = callback;
+  }
+
+  private parseSwapDetails(event: NostrEvent): SwapDetails | null {
+    try {
+      const content = JSON.parse(event.content);
+      if (!content.htlc_address || !content.hash_lock) return null;
+      return {
+        swapId: content.swap_id || event.id,
+        offerEventId: event.tags?.find(t => t[0] === 'a')?.[1] || '',
+        side: content.side,
+        htlcAddress: content.htlc_address,
+        hashLock: content.hash_lock,
+        claimPubKey: content.claim_pub_key || '',
+        refundPubKey: content.refund_pub_key || '',
+        lockTime: content.lock_time || 144,
+        network: content.network || 'regtest',
+        btcAmount: content.btc_amount_sats || 0,
+        b110Amount: content.b110_amount_sats || 0,
+        createdAt: event.created_at
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async publishSwapDetails(swap: Omit<SwapDetails, 'createdAt'>): Promise<string> {
+    const content = {
+      v: 1,
+      swap_id: swap.swapId,
+      side: swap.side,
+      htlc_address: swap.htlcAddress,
+      hash_lock: swap.hashLock,
+      claim_pub_key: swap.claimPubKey,
+      refund_pub_key: swap.refundPubKey,
+      lock_time: swap.lockTime,
+      network: swap.network,
+      btc_amount_sats: swap.btcAmount,
+      b110_amount_sats: swap.b110Amount
+    };
+
+    const event = finalizeEvent({
+      kind: 1337,
+      content: JSON.stringify(content),
+      tags: [
+        ['t', 'bip110-htlc'],
+        ['a', swap.offerEventId],
+        ['network', swap.network]
+      ],
+      created_at: Math.floor(Date.now() / 1000),
+      pubkey: this.pubkey
+    }, this.secretKey);
+
+    await this.publish(event);
+    return event.id;
+  }
+
+  subscribeSwapDetails(): void {
+    const filter = { kinds: [1337], '#t': ['bip110-htlc'], limit: 50 };
+    for (const [url, ws] of this.relays) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(['REQ', 'swaps', filter]));
+      }
+    }
   }
 
   subscribeOffers(): void {
