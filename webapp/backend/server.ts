@@ -13,6 +13,7 @@ import { MIN_CROSS_CHAIN_SAFETY_BLOCKS, assertFundingDeadline, secondLockTimeOff
 import { activationFromBlockchainInfo, mainnetActivationFromHeight, unavailableActivation } from '../../src/lib/bip110Activation';
 import { cachedExplorerRead, closeCache } from './cache';
 import { parseRawTransactionHex } from './transactionSubmission';
+import { MIN_OFFER_AMOUNT_SATS } from '../../src/lib/offerPolicy';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -45,6 +46,10 @@ const EXPLORER_CACHE_TTL = {
     fees: cacheTtl('EXPLORER_FEE_CACHE_SECONDS', 60)
 };
 
+// The production backend is exposed through a reverse proxy on the same host.
+// Trust forwarded client addresses only when the direct peer is loopback, so the
+// API rate limiter remains per-client without accepting spoofed headers remotely.
+app.set('trust proxy', 'loopback');
 app.use(cors());
 app.use(express.json());
 
@@ -399,14 +404,15 @@ function cachedProductionRead<T>(
     parameters: unknown,
     ttlSeconds: number,
     loader: () => Promise<T>,
-    staleIfError = false
+    staleIfError = false,
+    onStaleFallback?: (error: unknown) => void
 ): Promise<T> {
     return cachedExplorerRead(operation, {
         network: NETWORK_MODE,
         chain,
         explorer: productionSourceId(chain),
         parameters
-    }, ttlSeconds, loader, staleIfError);
+    }, ttlSeconds, loader, staleIfError, onStaleFallback);
 }
 
 async function currentChainHeight(chain: ExplorerChain): Promise<number> {
@@ -643,8 +649,8 @@ app.post('/api/offers', async (req: Request, res: Response) => {
     if (!/^(02|03)[0-9a-f]{64}$/i.test(initiatorPubKey) || !/^[0-9a-f]{64}$/i.test(hashLock)) {
         return res.status(400).json({ error: 'Invalid initiator public key or hash lock' });
     }
-    if (![b110Amount, btcAmount].every(Number.isSafeInteger) || b110Amount <= 0 || btcAmount <= 0) {
-        return res.status(400).json({ error: 'Amounts must be positive safe integers' });
+    if (![b110Amount, btcAmount].every(Number.isSafeInteger) || b110Amount < MIN_OFFER_AMOUNT_SATS || btcAmount < MIN_OFFER_AMOUNT_SATS) {
+        return res.status(400).json({ error: `Offer amounts must each be at least ${MIN_OFFER_AMOUNT_SATS.toLocaleString()} sats` });
     }
     if (!/^[0-9a-f]{64}$/i.test(backingTxid || '') || !Number.isSafeInteger(Number(backingVout)) || Number(backingVout) < 0
         || (backingChain !== 'main' && backingChain !== 'bip110')) {
@@ -1094,8 +1100,23 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
 
     if (mode === 'mainnet') {
         try {
-            const utxos = await cachedProductionRead(chain, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, () => getProductionUtxos(chain, address), true);
-            return res.json({ address, chain, utxos });
+            let staleFallback: unknown;
+            const utxos = await cachedProductionRead(
+                chain,
+                'address-utxos',
+                { address },
+                EXPLORER_CACHE_TTL.utxos,
+                () => getProductionUtxos(chain, address),
+                true,
+                error => { staleFallback = error; }
+            );
+            return res.json({
+                address,
+                chain,
+                utxos,
+                stale: staleFallback !== undefined,
+                rateLimited: staleFallback instanceof ExplorerRequestError && staleFallback.status === 429
+            });
         } catch (err: any) {
             return sendExplorerError(res, err, `${chain} UTXO lookup`);
         }

@@ -8,6 +8,7 @@ import { buildOutpointSet, classifyOutpoint, outpointKey } from '../../../src/li
 import { selectFundingUtxos } from '../../../src/lib/fundingSelection';
 import type { FundingFeeEstimator } from '../../../src/lib/fundingSelection';
 import { deadlineFromHeight, secondLockTimeOffset, validateLockTimeOffset } from '../../../src/lib/timelocks';
+import { MIN_OFFER_AMOUNT_SATS } from '../../../src/lib/offerPolicy';
 import { 
   Wallet, 
   Coins, 
@@ -342,6 +343,7 @@ function TutorialCarousel({ open, onClose }: TutorialCarouselProps) {
 export default function App() {
   const POLL_BASE_MS = 30_000;
   const WALLET_POLL_EVERY_TICKS = 2;
+  type RateLimitedResource = 'chain state' | 'marketplace' | 'wallet';
   // Navigation & Network Mode
   const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
   const [isTutorialOpen, setIsTutorialOpen] = useState(
@@ -400,6 +402,12 @@ export default function App() {
   const balanceFetchInFlightRef = useRef<boolean>(false);
   const balanceRefreshQueuedRef = useRef<boolean>(false);
   const balanceRetryAfterRef = useRef<number>(0);
+  const nodeFetchInFlightRef = useRef<boolean>(false);
+  const offersFetchInFlightRef = useRef<boolean>(false);
+  const nodeRetryAfterRef = useRef<number>(0);
+  const offersRetryAfterRef = useRef<number>(0);
+  const [rateLimitNotices, setRateLimitNotices] = useState<Partial<Record<RateLimitedResource, number>>>({});
+  const [rateLimitClock, setRateLimitClock] = useState<number>(() => Date.now());
 
   // Selected UTXO to split
   const [nodeInfo, setNodeInfo] = useState<{
@@ -1236,6 +1244,9 @@ export default function App() {
     setHasBalanceSnapshot(false);
     setBalanceSyncStatus('loading');
     balanceRetryAfterRef.current = 0;
+    nodeRetryAfterRef.current = 0;
+    offersRetryAfterRef.current = 0;
+    setRateLimitNotices({});
     const keyPrefix = networkMode === 'mainnet' ? 'mainnet' : 'regtest';
     const net = getNetwork();
 
@@ -1280,18 +1291,26 @@ export default function App() {
     fetchNodeInfo();
   }, [networkMode]);
 
-  // Fetch offers immediately whenever pagination/sorting or networkMode changes
+  const needsWalletData = activeTab === 'wallet'
+    || activeTab === 'splitter'
+    || activeTab === 'marketplace'
+    || activeTab === 'wizard';
+  const needsOfferData = activeTab === 'marketplace'
+    || activeTab === 'my-offers'
+    || activeTab === 'wizard';
+
+  // Fetch offers only while the current workflow displays or acts on them.
   useEffect(() => {
-    fetchOffers();
-  }, [networkMode, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
+    if (needsOfferData) fetchOffers();
+  }, [needsOfferData, networkMode, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
 
   // Refresh the wallet when its identity or scan range changes. Tab changes do not
   // alter wallet data and must not fan out another full multi-address scan.
   useEffect(() => {
-    if (splitAddress && ownAddress) {
+    if (needsWalletData && splitAddress && ownAddress) {
       fetchBalances();
     }
-  }, [splitAddress, ownAddress, networkMode, masterPrivateKey, maxIndex]);
+  }, [needsWalletData, splitAddress, ownAddress, networkMode, masterPrivateKey, maxIndex]);
 
   // One coordinator owns all background polling. Lightweight state refreshes every
   // 30s; the expensive multi-address, cross-chain wallet scan refreshes every 60s.
@@ -1301,15 +1320,22 @@ export default function App() {
     const interval = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
       tick += 1;
-      fetchNodeInfo();
-      fetchOffers();
-      if (tick % WALLET_POLL_EVERY_TICKS === 0 && splitAddress && ownAddress) {
+      if (tick % 2 === 0) fetchNodeInfo();
+      if (needsOfferData) fetchOffers();
+      if (needsWalletData && tick % WALLET_POLL_EVERY_TICKS === 0 && splitAddress && ownAddress) {
         fetchBalances();
       }
     }, POLL_BASE_MS);
 
     return () => clearInterval(interval);
-  }, [networkMode, splitAddress, ownAddress, masterPrivateKey, maxIndex, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
+  }, [needsOfferData, needsWalletData, networkMode, splitAddress, ownAddress, masterPrivateKey, maxIndex, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
+
+  useEffect(() => {
+    const retryTimes = Object.values(rateLimitNotices).filter((value): value is number => typeof value === 'number');
+    if (retryTimes.length === 0) return;
+    const interval = window.setInterval(() => setRateLimitClock(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [rateLimitNotices]);
 
   // Keep selectedOffer in sync with the polled offersList to transition wizard steps in real-time
   useEffect(() => {
@@ -1536,7 +1562,36 @@ export default function App() {
     showToast(`Switched active P2TR address to Address #${index + 1}`, 'success');
   };
 
+  const clearRateLimit = (resource: RateLimitedResource) => {
+    setRateLimitNotices(current => {
+      if (!(resource in current)) return current;
+      const next = { ...current };
+      delete next[resource];
+      return next;
+    });
+  };
+
+  const recordRateLimit = (err: any, resource: RateLimitedResource, fallbackSeconds = 60): number | undefined => {
+    const detail = String(err.response?.data?.detail || '');
+    const isRateLimited = err.response?.status === 429 || detail.includes('HTTP 429');
+    if (!isRateLimited) return undefined;
+
+    const header = err.response?.headers?.['retry-after'];
+    const numericSeconds = Number(header);
+    const parsedDate = typeof header === 'string' ? Date.parse(header) : Number.NaN;
+    const retryAt = Number.isFinite(numericSeconds) && numericSeconds > 0
+      ? Date.now() + numericSeconds * 1_000
+      : Number.isFinite(parsedDate) && parsedDate > Date.now()
+        ? parsedDate
+        : Date.now() + fallbackSeconds * 1_000;
+    setRateLimitNotices(current => ({ ...current, [resource]: retryAt }));
+    setRateLimitClock(Date.now());
+    return retryAt;
+  };
+
   const fetchNodeInfo = async () => {
+    if (nodeFetchInFlightRef.current || Date.now() < nodeRetryAfterRef.current) return;
+    nodeFetchInFlightRef.current = true;
     try {
       const res = await axios.get(`${API_BASE}/node/info`);
       setNodeInfo({
@@ -1545,45 +1600,68 @@ export default function App() {
         bip110Activation: res.data.bip110Activation ?? { ready: false, status: 'unavailable', activationHeight: null, requiredHeight: null, source: 'unavailable' },
         errors: res.data.errors
       });
+      nodeRetryAfterRef.current = 0;
+      clearRateLimit('chain state');
     } catch (err: any) {
-      setNodeInfo({
-        mainHeight: 0,
-        bip110Height: 0,
-        bip110Activation: { ready: false, status: 'unavailable', activationHeight: null, requiredHeight: null, source: 'unavailable' }
-      });
+      const retryAt = recordRateLimit(err, 'chain state');
+      if (retryAt) {
+        nodeRetryAfterRef.current = retryAt;
+      } else {
+        setNodeInfo({
+          mainHeight: 0,
+          bip110Height: 0,
+          bip110Activation: { ready: false, status: 'unavailable', activationHeight: null, requiredHeight: null, source: 'unavailable' }
+        });
+      }
       console.error(err);
+    } finally {
+      nodeFetchInFlightRef.current = false;
     }
   };
 
   const fetchOffers = async () => {
+    if (offersFetchInFlightRef.current || Date.now() < offersRetryAfterRef.current) return;
+    offersFetchInFlightRef.current = true;
     try {
-      // 1. Fetch Marketplace Offers (others' offers)
-      const excludeParam = publicKey ? `&excludePubKey=${publicKey}` : '';
-      const marketplaceRes = await axios.get(
-        `${API_BASE}/offers?networkMode=${networkMode}${excludeParam}&page=${offersPage}&limit=${offersLimit}&orderBy=${offersOrderBy}&orderDir=${offersOrderDir}`
-      );
-      setMarketplaceOffers(marketplaceRes.data.offers);
-      setOffersTotal(marketplaceRes.data.total);
-      setOffersTotalPages(marketplaceRes.data.totalPages);
+      const wantsMarketplace = activeTab === 'marketplace' || activeTab === 'wizard';
+      const wantsPersonalOffers = activeTab === 'my-offers' || activeTab === 'wizard';
+      const requests: Promise<void>[] = [];
 
-      if (publicKey) {
-        // 2. Fetch My Created Offers
-        const createdRes = await axios.get(
-          `${API_BASE}/offers?networkMode=${networkMode}&initiatorPubKey=${publicKey}&limit=100`
-        );
-        setMyCreatedOffers(createdRes.data.offers);
+      if (wantsMarketplace) {
+        requests.push((async () => {
+          const excludeParam = publicKey ? `&excludePubKey=${publicKey}` : '';
+          const response = await axios.get(
+            `${API_BASE}/offers?networkMode=${networkMode}${excludeParam}&page=${offersPage}&limit=${offersLimit}&orderBy=${offersOrderBy}&orderDir=${offersOrderDir}`
+          );
+          setMarketplaceOffers(response.data.offers);
+          setOffersTotal(response.data.total);
+          setOffersTotalPages(response.data.totalPages);
+        })());
+      }
 
-        // 3. Fetch My Accepted Offers
-        const acceptedRes = await axios.get(
-          `${API_BASE}/offers?networkMode=${networkMode}&acceptorPubKey=${publicKey}&limit=100`
-        );
-        setMyAcceptedOffers(acceptedRes.data.offers);
-      } else {
+      if (wantsPersonalOffers && publicKey) {
+        requests.push((async () => {
+          const [createdRes, acceptedRes] = await Promise.all([
+            axios.get(`${API_BASE}/offers?networkMode=${networkMode}&initiatorPubKey=${publicKey}&limit=100`),
+            axios.get(`${API_BASE}/offers?networkMode=${networkMode}&acceptorPubKey=${publicKey}&limit=100`)
+          ]);
+          setMyCreatedOffers(createdRes.data.offers);
+          setMyAcceptedOffers(acceptedRes.data.offers);
+        })());
+      } else if (wantsPersonalOffers) {
         setMyCreatedOffers([]);
         setMyAcceptedOffers([]);
       }
+
+      await Promise.all(requests);
+      offersRetryAfterRef.current = 0;
+      clearRateLimit('marketplace');
     } catch (err: any) {
+      const retryAt = recordRateLimit(err, 'marketplace');
+      if (retryAt) offersRetryAfterRef.current = retryAt;
       console.error(err);
+    } finally {
+      offersFetchInFlightRef.current = false;
     }
   };
 
@@ -1606,6 +1684,7 @@ export default function App() {
       let aggregatedBip110Utxos: any[] = [];
       let aggregatedOwnMainUtxos: any[] = [];
       let aggregatedOwnBip110Utxos: any[] = [];
+      let usedRateLimitedFallback = false;
 
       // Async transaction handlers may call this function from a render that predates
       // a freshly derived change address. The persisted index is updated synchronously,
@@ -1622,19 +1701,23 @@ export default function App() {
         
         // 1. Fetch Contract UTXOs (Unsplit)
         const resMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'main', networkMode });
+        usedRateLimitedFallback ||= resMain.data.rateLimited === true;
         const mainWithIndex = resMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedMainUtxos.push(...mainWithIndex);
 
         const resBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.splitAddress, chain: 'bip110', networkMode });
+        usedRateLimitedFallback ||= resBip110.data.rateLimited === true;
         const bip110WithIndex = resBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.splitAddress }));
         aggregatedBip110Utxos.push(...bip110WithIndex);
 
         // 2. Fetch derived keypath-address UTXOs; cross-chain presence determines classification.
         const resOwnMain = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'main', networkMode });
+        usedRateLimitedFallback ||= resOwnMain.data.rateLimited === true;
         const ownMainWithIndex = resOwnMain.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnMainUtxos.push(...ownMainWithIndex);
 
         const resOwnBip110 = await axios.post(`${API_BASE}/wallet/utxos`, { address: childKeys.ownAddress, chain: 'bip110', networkMode });
+        usedRateLimitedFallback ||= resOwnBip110.data.rateLimited === true;
         const ownBip110WithIndex = resOwnBip110.data.utxos.map((u: any) => ({ ...u, index: i, address: childKeys.ownAddress }));
         aggregatedOwnBip110Utxos.push(...ownBip110WithIndex);
       }
@@ -1664,19 +1747,24 @@ export default function App() {
       const totalOwnBip110 = aggregatedOwnBip110Utxos.reduce((sum, u) => sum + u.amount, 0);
       setOwnBip110Balance(totalOwnBip110);
 
-      balanceRetryAfterRef.current = 0;
       setHasBalanceSnapshot(true);
-      setBalanceSyncStatus('ready');
+      if (usedRateLimitedFallback) {
+        balanceRetryAfterRef.current = recordRateLimit({ response: { status: 429 } }, 'wallet', 60) ?? Date.now() + 60_000;
+        setBalanceSyncStatus('rate-limited');
+      } else {
+        balanceRetryAfterRef.current = 0;
+        clearRateLimit('wallet');
+        setBalanceSyncStatus('ready');
+      }
 
     } catch (err: any) {
       // Publish only complete cross-chain snapshots. A failed refresh must not turn
       // a known wallet into an alarming zero balance or empty UTXO set.
       if (err.response?.status === 429) {
-        const retryAfterHeader = Number(err.response?.headers?.['retry-after']);
-        const retryAfterSeconds = Number.isFinite(retryAfterHeader) && retryAfterHeader > 0
-          ? retryAfterHeader
-          : 10;
-        balanceRetryAfterRef.current = Date.now() + retryAfterSeconds * 1000;
+        balanceRetryAfterRef.current = recordRateLimit(err, 'wallet', 60) ?? Date.now() + 60_000;
+        setBalanceSyncStatus('rate-limited');
+      } else if (String(err.response?.data?.detail || '').includes('HTTP 429')) {
+        balanceRetryAfterRef.current = recordRateLimit(err, 'wallet', 60) ?? Date.now() + 60_000;
         setBalanceSyncStatus('rate-limited');
       } else {
         setBalanceSyncStatus('error');
@@ -1992,8 +2080,12 @@ export default function App() {
       const backingChain = selectedBackingChain;
 
       const sellAmount = Number(sellAmountSats);
-      if (!Number.isSafeInteger(sellAmount) || sellAmount <= 0) {
-        throw new Error("Please enter a valid whole-number sell amount in sats.");
+      if (!Number.isSafeInteger(sellAmount) || sellAmount < MIN_OFFER_AMOUNT_SATS) {
+        throw new Error(`Sell amount must be at least ${MIN_OFFER_AMOUNT_SATS.toLocaleString()} sats.`);
+      }
+      const buyAmount = backingChain === 'main' ? Number(newOfferB110) : Number(newOfferBtc);
+      if (!Number.isSafeInteger(buyAmount) || buyAmount < MIN_OFFER_AMOUNT_SATS) {
+        throw new Error(`The amount requested in return must be at least ${MIN_OFFER_AMOUNT_SATS.toLocaleString()} sats.`);
       }
 
       const fundingCandidates = getSplitUtxosForChain(backingChain!);
@@ -2498,6 +2590,15 @@ export default function App() {
   // not a meaningful reorg-safety signal between these chains.
   const isActivationLockout = networkMode === 'mainnet' && !nodeInfo.bip110Activation.ready;
   const isLockoutActive = isActivationLockout;
+  const activeRateLimits = (Object.entries(rateLimitNotices) as Array<[RateLimitedResource, number]>)
+    .filter(([, retryAt]) => retryAt > rateLimitClock);
+  const nextRateLimitRetryAt = activeRateLimits.length > 0
+    ? Math.min(...activeRateLimits.map(([, retryAt]) => retryAt))
+    : 0;
+  const rateLimitSecondsRemaining = nextRateLimitRetryAt
+    ? Math.max(1, Math.ceil((nextRateLimitRetryAt - rateLimitClock) / 1_000))
+    : 0;
+  const isWalletRateLimited = activeRateLimits.some(([resource]) => resource === 'wallet');
 
   return (
     <div className="app-shell min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -2652,7 +2753,9 @@ export default function App() {
 
             <button 
               onClick={fetchBalances}
-              className="p-2 text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-lg transition-all"
+              disabled={isWalletRateLimited}
+              title={isWalletRateLimited ? 'Wallet refresh is paused until the request limit clears' : 'Refresh wallet'}
+              className="p-2 text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 hover:border-slate-700 rounded-lg transition-all disabled:cursor-not-allowed disabled:opacity-40"
             >
               <RefreshCw className="w-4 h-4" />
             </button>
@@ -2689,6 +2792,25 @@ export default function App() {
           })}
         </div>
       </nav>
+
+      {activeRateLimits.length > 0 && (
+        <div className="border-t border-amber-500/20 bg-amber-950/95" role="alert" aria-live="assertive">
+          <div className="mx-auto flex max-w-7xl items-start gap-3 px-4 py-3 sm:items-center sm:px-6">
+            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-amber-400/40 bg-amber-400/10 sm:mt-0">
+              <AlertTriangle className="h-4 w-4 text-amber-300" aria-hidden="true" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-black uppercase tracking-[0.14em] text-amber-200">
+                Request limit reached
+              </p>
+              <p className="mt-0.5 text-xs leading-relaxed text-amber-100/75">
+                Paused {activeRateLimits.map(([resource]) => resource).join(', ')} updates for {rateLimitSecondsRemaining}s.
+                Existing information remains visible and automatic retries will resume when the limit clears.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
 
       {/* Main Content Area */}
@@ -2936,7 +3058,7 @@ export default function App() {
                       ? 'border-rose-900/50 bg-rose-950/20 text-rose-300'
                       : 'border-amber-900/50 bg-amber-950/20 text-amber-300'
                   }`} role="status" aria-live="polite">
-                    <RefreshCw className={`h-3.5 w-3.5 ${balanceSyncStatus !== 'error' ? 'animate-spin' : ''}`} />
+                    <RefreshCw className={`h-3.5 w-3.5 ${balanceSyncStatus === 'loading' ? 'animate-spin' : ''}`} />
                     {balanceSyncStatus === 'rate-limited'
                       ? 'Wallet service is busy. Keeping the last confirmed balances and retrying shortly…'
                       : balanceSyncStatus === 'error'
@@ -3115,7 +3237,7 @@ export default function App() {
             >
               {balanceSyncStatus !== 'ready' && (
                 <div className="mb-4 flex items-center gap-2 rounded-xl border border-amber-900/40 bg-amber-950/15 px-3 py-2.5 text-xs text-amber-300" role="status">
-                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                  <RefreshCw className={`h-3.5 w-3.5 ${balanceSyncStatus === 'loading' ? 'animate-spin' : ''}`} />
                   {balanceSyncStatus === 'rate-limited'
                     ? 'Rate limited — retaining the last complete UTXO snapshot while we wait to retry.'
                     : hasBalanceSnapshot
@@ -3720,13 +3842,14 @@ export default function App() {
                           </label>
                           <input
                             type="number"
-                            min="100000"
+                            min={MIN_OFFER_AMOUNT_SATS}
                             value={sellAmountSats}
                             onChange={(e) => handleSellAmountChange(e.target.value)}
                             placeholder={`Up to aggregate balance minus fees`}
                             className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-indigo-500 font-mono"
                           />
                           <span className="text-[10px] text-slate-500 mt-1 block">
+                            Minimum offer: <span className="font-semibold text-slate-400">{MIN_OFFER_AMOUNT_SATS.toLocaleString()} sats</span>.{' '}
                             Aggregate split balance: <span className="font-semibold text-slate-400">{aggregateBalance.toLocaleString()} Sats</span> ({(aggregateBalance / 100000000).toFixed(4)} {chainLabel}) across {fundingCandidates.length} UTXO{fundingCandidates.length === 1 ? '' : 's'}. Fees must also fit within this balance.
                           </span>
                           <span className="text-[10px] text-slate-600 mt-1 block">

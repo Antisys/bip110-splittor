@@ -52,7 +52,8 @@ export async function cachedExplorerRead<T>(
     identity: unknown,
     ttlSeconds: number,
     loader: () => Promise<T>,
-    staleIfError = false
+    staleIfError = false,
+    onStaleFallback?: (error: unknown) => void
 ): Promise<T> {
     const key = explorerCacheKey(operation, identity);
     const now = Date.now();
@@ -87,6 +88,7 @@ export async function cachedExplorerRead<T>(
         } catch (error) {
             if (staleIfError && stale) {
                 logWarn('cache.stale_fallback', { operation, error: error instanceof Error ? error.message : String(error) });
+                onStaleFallback?.(error);
                 return stale.value as T;
             }
             throw error;
