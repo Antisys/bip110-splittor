@@ -83,6 +83,13 @@ export class NostrClient {
           const offer = this.parseOffer(event);
           if (offer) this.offerCallback?.(offer);
         }
+      } else if (msg[0] === 'OK') {
+        const [eventId, success, msg2] = msg.slice(1);
+        if (!success) {
+          console.error(`[NOSTR] Event ${String(eventId).slice(0,16)} rejected:`, msg2);
+        } else {
+          console.log(`[NOSTR] Event ${String(eventId).slice(0,16)} accepted`);
+        }
       }
     } catch {}
   }
@@ -167,9 +174,13 @@ export class NostrClient {
 
   private async publish(event: NostrEvent): Promise<void> {
     const msg = JSON.stringify(['EVENT', event]);
+    console.log(`[NOSTR] Publishing event ${event.id?.slice(0,16)} to ${this.relays.size} relay(s)`);
     for (const [url, ws] of this.relays) {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(msg);
+        console.log(`[NOSTR] Sent to ${url}`);
+      } else {
+        console.warn(`[NOSTR] Cannot send to ${url} — state ${ws.readyState}`);
       }
     }
   }
