@@ -64,7 +64,14 @@ export default function App() {
 
   const publishOffer = async (offer: Omit<SwapOffer, 'id' | 'pubkey' | 'createdAt' | 'sig'>) => {
     if (!client) return;
-    await client.publishOffer(offer);
+    const id = await client.publishOffer(offer);
+    const localOffer: SwapOffer = {
+      ...offer,
+      id,
+      pubkey: client.getPubkey(),
+      createdAt: Math.floor(Date.now() / 1000)
+    };
+    setOffers(prev => [localOffer, ...prev]);
   };
 
   const deleteOffer = async (eventId: string) => {
