@@ -21,7 +21,7 @@ export interface SwapState {
   fundTxid?: string;
   claimTxid?: string;
   preimage?: string;
-  hashLock?: Buffer;
+  hashLock?: string;
   createdAt: number;
 }
 
@@ -74,11 +74,13 @@ export class SwapEngine {
     return ECPair.makeRandom({ network: bitcoin.networks.regtest });
   }
 
-  computeHashLock(preimage: string): Buffer {
-    return Buffer.from(bitcoin.crypto.sha256(Buffer.from(preimage, 'utf8')));
+  computeHashLock(preimage: string): string {
+    const data = new TextEncoder().encode(preimage);
+    const hash = bitcoin.crypto.sha256(data);
+    return Array.from(hash).map(b => b.toString(16).padStart(2, '0')).join('');
   }
 
-  generatePreimage(): { preimage: string; hashLock: Buffer } {
+  generatePreimage(): { preimage: string; hashLock: string } {
     const preimage = Array.from(crypto.getRandomValues(new Uint8Array(32)))
       .map(b => b.toString(16).padStart(2, '0'))
       .join('');
