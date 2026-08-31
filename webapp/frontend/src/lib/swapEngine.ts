@@ -28,6 +28,8 @@ export interface SwapState {
   network?: string;
   lockTime?: number;
   controlBlock?: string;
+  claimControlBlock?: string;
+  refundControlBlock?: string;
   claimScriptHex?: string;
   refundScriptHex?: string;
   createdAt: number;
@@ -76,19 +78,10 @@ export class SwapEngine {
     return Buffer.from(bitcoin.crypto.taggedHash('TapLeaf', prefix));
   }
 
-  private computeControlBlock(
-    internalPubKey: Buffer,
-    leafScript: Buffer,
-    siblingScript: Buffer
-  ): Buffer {
-    const leafVersion = Buffer.from([0xc0]);
-    const merkleProof = this.computeTapleafHash(siblingScript);
-    return Buffer.concat([internalPubKey, leafVersion, merkleProof]);
-  }
-
   createHtlcAddress(hashLockHex: string, claimPubKey: Buffer, refundPubKey: Buffer, lockTime: number, network: bitcoin.Network): {
     address: string;
-    controlBlock: string;
+    claimControlBlock: string;
+    refundControlBlock: string;
     claimScriptHex: string;
     refundScriptHex: string;
   } {
@@ -122,9 +115,16 @@ export class SwapEngine {
       network
     });
 
+    const claimLeafHash = this.computeTapleafHash(claimScript);
+    const refundLeafHash = this.computeTapleafHash(refundScript);
+
+    const claimControlBlock = Buffer.concat([internalKey, Buffer.from([0xc0]), refundLeafHash]);
+    const refundControlBlock = Buffer.concat([internalKey, Buffer.from([0xc0]), claimLeafHash]);
+
     return {
       address: payment.address!,
-      controlBlock: payment.controlBlock!.toString('hex'),
+      claimControlBlock: claimControlBlock.toString('hex'),
+      refundControlBlock: refundControlBlock.toString('hex'),
       claimScriptHex: claimScript.toString('hex'),
       refundScriptHex: refundScript.toString('hex')
     };
@@ -139,7 +139,7 @@ export class SwapEngine {
     const claimKeyPair = ECPair.makeRandom({ network });
     const refundKeyPair = ECPair.makeRandom({ network });
 
-    const { address, controlBlock, claimScriptHex, refundScriptHex } = this.createHtlcAddress(
+    const { address, claimControlBlock, refundControlBlock, claimScriptHex, refundScriptHex } = this.createHtlcAddress(
       hashLock,
       claimKeyPair.publicKey,
       refundKeyPair.publicKey,
@@ -159,7 +159,8 @@ export class SwapEngine {
       refundPubKey: refundKeyPair.publicKey.toString('hex'),
       refundPrivKey: refundKeyPair.toWIF(),
       htlcAddress: address,
-      controlBlock,
+      claimControlBlock,
+      refundControlBlock,
       claimScriptHex,
       refundScriptHex,
       btcAmount: amounts?.btc,
@@ -177,14 +178,14 @@ export class SwapEngine {
   buildClaimPsbt(swapId: string, inputs: InputInfo[], outputs: OutputInfo[]): string {
     const swap = this.swaps.get(swapId);
     if (!swap) throw new Error('Swap not found');
-    if (!swap.preimage || !swap.claimPrivKey || !swap.claimScriptHex || !swap.controlBlock) {
+    if (!swap.preimage || !swap.claimPrivKey || !swap.claimScriptHex || !swap.claimControlBlock) {
       throw new Error('Swap missing claim data');
     }
 
     const network = this.getNetwork(swap.network);
     const claimKeyPair = ECPair.fromWIF(swap.claimPrivKey, network);
     const claimScript = Buffer.from(swap.claimScriptHex, 'hex');
-    const controlBlock = Buffer.from(swap.controlBlock, 'hex');
+    const controlBlock = Buffer.from(swap.claimControlBlock, 'hex');
     const preimage = Buffer.from(swap.preimage, 'hex');
 
     const psbt = new bitcoin.Psbt({ network });
@@ -233,14 +234,14 @@ export class SwapEngine {
   buildRefundPsbt(swapId: string, inputs: InputInfo[], outputs: OutputInfo[]): string {
     const swap = this.swaps.get(swapId);
     if (!swap) throw new Error('Swap not found');
-    if (!swap.refundPrivKey || !swap.refundScriptHex || !swap.controlBlock) {
+    if (!swap.refundPrivKey || !swap.refundScriptHex || !swap.refundControlBlock) {
       throw new Error('Swap missing refund data');
     }
 
     const network = this.getNetwork(swap.network);
     const refundKeyPair = ECPair.fromWIF(swap.refundPrivKey, network);
     const refundScript = Buffer.from(swap.refundScriptHex, 'hex');
-    const controlBlock = Buffer.from(swap.controlBlock, 'hex');
+    const controlBlock = Buffer.from(swap.refundControlBlock, 'hex');
 
     const psbt = new bitcoin.Psbt({ network });
 
