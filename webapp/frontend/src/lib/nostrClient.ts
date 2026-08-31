@@ -79,7 +79,7 @@ export class NostrClient {
       const msg = JSON.parse(data);
       if (msg[0] === 'EVENT') {
         const event = msg[2] as NostrEvent;
-        if (event.kind === 20110) {
+        if (event.kind === 1 && event.tags?.some(t => t[0] === 't' && t[1] === 'bip110-swap')) {
           const offer = this.parseOffer(event);
           if (offer) this.offerCallback?.(offer);
         }
@@ -123,7 +123,7 @@ export class NostrClient {
   }
 
   subscribeOffers(): void {
-    const filter = { kinds: [20110], limit: 100 };
+    const filter = { kinds: [1], '#t': ['bip110-swap'], limit: 100 };
     for (const [url, ws] of this.relays) {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(['REQ', 'offers', filter]));
@@ -144,9 +144,10 @@ export class NostrClient {
     };
 
     const event = finalizeEvent({
-      kind: 20110,
+      kind: 1,
       content: JSON.stringify(content),
       tags: [
+        ['t', 'bip110-swap'],
         ['chain', 'bip110'],
         ['network', offer.network],
         ['premium', String(offer.premiumPct)],
