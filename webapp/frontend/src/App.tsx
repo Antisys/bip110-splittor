@@ -15,7 +15,7 @@ interface AppConfig {
 }
 
 const defaultConfig: AppConfig = {
-  relays: ['wss://damus.io'],
+  relays: ['wss://relay.damus.io'],
   b110Rpc: { host: '127.0.0.1', port: 18443, user: 'user', pass: 'password' },
   mainRpc: { host: '127.0.0.1', port: 18443, user: 'user', pass: 'password' }
 };
@@ -92,9 +92,12 @@ export default function App() {
         <div className="max-w-6xl mx-auto flex items-center justify-between">
           <h1 className="text-xl font-bold">BIP-110 DEX</h1>
           <div className="flex items-center gap-4">
-            <span className={`text-sm ${connected ? 'text-green-400' : 'text-red-400'}`}>
-              {connected ? 'Connected' : 'Disconnected'}
-            </span>
+            <div className="text-sm">
+              <span className="text-slate-500">Relay: </span>
+              <span className={connected ? 'text-green-400' : 'text-red-400'}>
+                {connected ? 'Connected' : 'Disconnected'}
+              </span>
+            </div>
             <span className="text-sm text-slate-400">{offers.length} offers</span>
           </div>
         </div>

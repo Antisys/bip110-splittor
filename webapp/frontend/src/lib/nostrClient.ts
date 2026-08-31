@@ -51,14 +51,26 @@ export class NostrClient {
 
   private async connectRelay(url: string): Promise<void> {
     return new Promise((resolve) => {
-      const ws = new WebSocket(url);
-      ws.onopen = () => {
-        this.relays.set(url, ws);
+      try {
+        const ws = new WebSocket(url);
+        ws.onopen = () => {
+          console.log(`[NOSTR] Connected to ${url}`);
+          this.relays.set(url, ws);
+          resolve();
+        };
+        ws.onerror = (e) => {
+          console.error(`[NOSTR] Error connecting to ${url}:`, e);
+          resolve();
+        };
+        ws.onmessage = (event) => this.handleMessage(event.data);
+        ws.onclose = () => {
+          console.log(`[NOSTR] Disconnected from ${url}`);
+          this.relays.delete(url);
+        };
+      } catch (e) {
+        console.error(`[NOSTR] Failed to create WebSocket for ${url}:`, e);
         resolve();
-      };
-      ws.onerror = () => resolve();
-      ws.onmessage = (event) => this.handleMessage(event.data);
-      ws.onclose = () => this.relays.delete(url);
+      }
     });
   }
 

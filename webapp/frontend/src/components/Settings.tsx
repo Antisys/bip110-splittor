@@ -44,7 +44,7 @@ export function Settings({ config, onChange }: SettingsProps) {
             onChange={(e) => setRelays(e.target.value)}
             rows={3}
             className="w-full bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:border-slate-600"
-            placeholder="wss://damus.io"
+            placeholder="wss://relay.damus.io"
           />
         </div>
 
