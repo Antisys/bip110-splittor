@@ -341,7 +341,7 @@ function TutorialCarousel({ open, onClose }: TutorialCarouselProps) {
 
 export default function App() {
   // Navigation & Network Mode
-  const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
+  const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard' | 'relay' | 'orderbook'>('wallet');
   const [isTutorialOpen, setIsTutorialOpen] = useState(
     () => localStorage.getItem(TUTORIAL_STORAGE_KEY) !== 'true'
   );
@@ -463,6 +463,14 @@ export default function App() {
 
   // Toast notifications
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+
+  // Relay/Nostr State
+  const [relayUrls, setRelayUrls] = useState<string[]>(['wss://damus.io']);
+  const [relayStatus, setRelayStatus] = useState<{ connected: boolean; lastSync: number; relayCount: number; pubkey: string }>({ connected: false, lastSync: 0, relayCount: 0, pubkey: '' });
+  const [relayInput, setRelayInput] = useState<string>('');
+  const [relayLoading, setRelayLoading] = useState<boolean>(false);
+  const [orderbookOffers, setOrderbookOffers] = useState<Offer[]>([]);
+  const [orderbookFilter, setOrderbookFilter] = useState<'all' | 'local' | 'remote'>('all');
 
   // Helpers
   const getNetwork = (): bitcoin.Network => {
@@ -1310,6 +1318,71 @@ export default function App() {
       }
     }
   }, [offersList, selectedOffer]);
+
+  // Relay status polling
+  useEffect(() => {
+    const fetchRelayStatus = async () => {
+      try {
+        const res = await axios.get(`${API_BASE}/relay/status`);
+        setRelayStatus(res.data);
+      } catch { /* relay not configured */ }
+    };
+    fetchRelayStatus();
+    const interval = setInterval(fetchRelayStatus, 15000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Orderbook fetch (when orderbook tab active)
+  const fetchOrderbook = async () => {
+    try {
+      const res = await axios.get(`${API_BASE}/offers/all`, { params: { page: 1, limit: 50 } });
+      setOrderbookOffers(res.data.offers || []);
+    } catch (err) { console.warn('Orderbook fetch failed:', err); }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'orderbook') fetchOrderbook();
+  }, [activeTab]);
+
+  const handleAddRelay = async () => {
+    if (!relayInput.trim()) return;
+    const newUrls = [...relayUrls, relayInput.trim()];
+    setRelayLoading(true);
+    try {
+      await axios.post(`${API_BASE}/relay/config`, { relays: newUrls });
+      setRelayUrls(newUrls);
+      setRelayInput('');
+      showToast('Relay added', 'success');
+    } catch (err: any) {
+      showToast(`Failed: ${err.message}`, 'error');
+    }
+    setRelayLoading(false);
+  };
+
+  const handleRemoveRelay = async (url: string) => {
+    const newUrls = relayUrls.filter(u => u !== url);
+    setRelayLoading(true);
+    try {
+      await axios.post(`${API_BASE}/relay/config`, { relays: newUrls });
+      setRelayUrls(newUrls);
+      showToast('Relay removed', 'success');
+    } catch (err: any) {
+      showToast(`Failed: ${err.message}`, 'error');
+    }
+    setRelayLoading(false);
+  };
+
+  const handleSyncNow = async () => {
+    setRelayLoading(true);
+    try {
+      const res = await axios.post(`${API_BASE}/offers/sync`);
+      showToast(`Sync: ${res.data.imported} new, ${res.data.updated} updated`, 'success');
+      fetchOrderbook();
+    } catch (err: any) {
+      showToast(`Sync failed: ${err.message}`, 'error');
+    }
+    setRelayLoading(false);
+  };
 
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
@@ -2615,8 +2688,10 @@ export default function App() {
             { id: 'wallet', label: '1. Unified Wallet', icon: Wallet },
             { id: 'splitter', label: '2. Bilateral Splitter', icon: Coins },
             { id: 'marketplace', label: '3. Marketplace Lobby', icon: TrendingUp },
+            { id: 'orderbook', label: '3b. Orderbook', icon: Globe },
             { id: 'my-offers', label: '4. My Swaps & Offers', icon: User },
-            { id: 'wizard', label: '5. Swap Wizard', icon: Award }
+            { id: 'wizard', label: '5. Swap Wizard', icon: Award },
+            { id: 'relay', label: 'Relay', icon: Layers }
           ].map(tab => {
             const Icon = tab.icon;
             return (
@@ -4576,7 +4651,115 @@ export default function App() {
             )}
           </div>
         )}
-          </>
+           </>
+        )}
+
+        {/* TAB: RELAY SETTINGS */}
+        {activeTab === 'relay' && (
+          <div className="space-y-6">
+            <CollapsibleCard title="Nostr Relay Configuration" icon={Layers} defaultOpen={true}>
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className={`w-2 h-2 rounded-full ${relayStatus.connected ? 'bg-emerald-400' : 'bg-rose-400'}`} />
+                  <span className="text-xs font-semibold text-slate-300">
+                    {relayStatus.connected ? 'Connected' : 'Disconnected'} — {relayStatus.relayCount} relay(s) configured
+                  </span>
+                  {relayStatus.pubkey && (
+                    <span className="text-[10px] text-slate-500 font-mono ml-auto">Pubkey: {relayStatus.pubkey.substring(0, 16)}...</span>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  {relayUrls.map(url => (
+                    <div key={url} className="flex items-center gap-2 bg-slate-950 border border-slate-850 px-3 py-2 rounded-xl">
+                      <span className="text-xs text-slate-300 flex-1 font-mono">{url}</span>
+                      <button onClick={() => handleRemoveRelay(url)} disabled={relayLoading}
+                        className="text-[10px] text-rose-400 hover:text-rose-300 font-semibold px-2 py-1 rounded bg-rose-950/30 border border-rose-900/40 transition-all">
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-2">
+                  <input value={relayInput} onChange={e => setRelayInput(e.target.value)}
+                    placeholder="wss://relay.example.com"
+                    className="flex-1 bg-slate-950 border border-slate-800 px-3 py-2 rounded-xl text-xs text-slate-200 font-mono focus:outline-none focus:border-indigo-500"
+                    onKeyDown={e => e.key === 'Enter' && handleAddRelay()}
+                  />
+                  <button onClick={handleAddRelay} disabled={relayLoading || !relayInput.trim()}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 text-xs font-semibold text-white rounded-xl transition-all">
+                    Add
+                  </button>
+                </div>
+
+                <button onClick={handleSyncNow} disabled={relayLoading}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-xs font-semibold text-white rounded-xl transition-all flex items-center gap-1.5">
+                  <RefreshCw className={`w-3 h-3 ${relayLoading ? 'animate-spin' : ''}`} />
+                  Sync Now
+                </button>
+
+                {relayStatus.lastSync > 0 && (
+                  <p className="text-[10px] text-slate-500">Last sync: {new Date(relayStatus.lastSync * 1000).toLocaleTimeString()}</p>
+                )}
+              </div>
+            </CollapsibleCard>
+          </div>
+        )}
+
+        {/* TAB: ORDERBOOK */}
+        {activeTab === 'orderbook' && (
+          <div className="space-y-6">
+            <CollapsibleCard title="Distributed Orderbook (Nostr)" icon={Globe} defaultOpen={true}
+              headerRight={
+                <div className="flex gap-2">
+                  <select value={orderbookFilter} onChange={e => setOrderbookFilter(e.target.value as any)}
+                    className="bg-slate-950 border border-slate-800 px-2 py-1 rounded text-[10px] text-slate-300">
+                    <option value="all">All Offers</option>
+                    <option value="local">Local Only</option>
+                    <option value="remote">Remote Only</option>
+                  </select>
+                  <button onClick={fetchOrderbook}
+                    className="p-1.5 text-slate-400 hover:text-white bg-slate-900 hover:bg-slate-800 border border-slate-800 rounded-lg transition-all">
+                    <RefreshCw className="w-3 h-3" />
+                  </button>
+                </div>
+              }>
+              <div className="space-y-3">
+                {orderbookOffers.length === 0 ? (
+                  <div className="text-center py-8 text-slate-500 text-xs">
+                    No offers found. Configure a relay in the Relay tab and sync.
+                  </div>
+                ) : (
+                  orderbookOffers
+                    .filter(o => orderbookFilter === 'all' || o.source === orderbookFilter)
+                    .map(o => (
+                      <div key={o.id} className="bg-slate-950 border border-slate-850 p-4 rounded-xl flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${o.backingChain === 'bip110' ? 'bg-sky-950/60 text-sky-400 border border-sky-900/40' : 'bg-emerald-950/60 text-emerald-400 border border-emerald-900/40'}`}>
+                              {o.backingChain === 'bip110' ? 'B110' : 'BTC'}
+                            </span>
+                            <span className="text-[10px] text-slate-500">#{o.id.substring(0, 8)}</span>
+                            {o.source === 'remote' && (
+                              <span className="text-[10px] text-indigo-400 bg-indigo-950/30 px-1.5 py-0.5 rounded border border-indigo-900/30">remote</span>
+                            )}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-300">
+                            Sell <span className="font-mono font-semibold text-white">{(o.initiatorB110Amount / 100000000).toFixed(4)}</span> B110
+                            for <span className="font-mono font-semibold text-white">{(o.acceptorBtcAmount / 100000000).toFixed(4)}</span> BTC
+                          </div>
+                        </div>
+                        <button onClick={() => { setSelectedOffer(o); setActiveTab('wizard'); }}
+                          className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-[10px] font-semibold text-white rounded-lg transition-all">
+                          View Swap
+                        </button>
+                      </div>
+                    ))
+                )}
+              </div>
+            </CollapsibleCard>
+          </div>
         )}
       </main>
 

@@ -39,6 +39,9 @@ export async function runMigrations(): Promise<void> {
             ['btcHtlcVout', 'INTEGER']
             ,['initiatorSettlementTxid', 'TEXT']
             ,['acceptorSettlementTxid', 'TEXT']
+            ,['nostr_event_id', 'TEXT']
+            ,['source', "TEXT DEFAULT 'local'"]
+            ,['relay_url', 'TEXT']
         ];
         for (const [name, type] of additiveColumns) {
             try { await dbRun(`ALTER TABLE offers ADD COLUMN ${name} ${type}`); }

@@ -26,6 +26,9 @@ export interface DbOffer {
     backingVout?: number | null;
     backingChain?: 'main' | 'bip110' | null;
     acceptorClaimed?: number; // 0 or 1
+    nostr_event_id?: string | null;
+    source?: 'local' | 'remote';
+    relay_url?: string | null;
 }
 
 export interface GetOffersOptions {
@@ -36,6 +39,7 @@ export interface GetOffersOptions {
     excludePubKey?: string;
     initiatorPubKey?: string;
     acceptorPubKey?: string;
+    source?: 'local' | 'remote' | 'all';
 }
 
 export interface PaginatedOffers {
@@ -85,6 +89,10 @@ export async function getOffersByMode(
     if (options.acceptorPubKey) {
         whereClause += " AND acceptorPubKey = ?";
         whereParams.push(options.acceptorPubKey);
+    }
+    if (options.source && options.source !== 'all') {
+        whereClause += " AND source = ?";
+        whereParams.push(options.source);
     }
 
     const countResult = await dbGet(

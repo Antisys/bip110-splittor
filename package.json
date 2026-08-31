@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "mocha -r ts-node/register tests/**/*.test.ts",
+    "test": "tsx node_modules/.bin/mocha 'tests/**/*.test.ts'",
     "test:split": "npx ts-node tests/regtest-split-primitive.ts",
     "test:swap": "npx ts-node tests/regtest-full-swap.ts",
     "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts",
@@ -24,9 +24,11 @@
     "cors": "^2.8.6",
     "ecpair": "^3.0.1",
     "express": "^5.2.1",
+    "nostr-tools": "^2.25.1",
     "redis": "^5.12.1",
     "sqlite3": "^6.0.1",
-    "tiny-secp256k1": "^2.2.4"
+    "tiny-secp256k1": "^2.2.4",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/chai": "^5.2.3",
@@ -35,9 +37,11 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "^26.0.1",
     "@types/sqlite3": "^3.1.11",
+    "@types/ws": "^8.18.1",
     "chai": "^6.2.2",
     "mocha": "^11.7.6",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.13",
     "typescript": "^6.0.3",
     "vite-plugin-node-polyfills": "^0.28.0"
   }

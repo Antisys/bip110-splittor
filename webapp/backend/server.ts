@@ -24,6 +24,7 @@ import {
     walkbackAcceptanceById,
     DbOffer as Offer
 } from './database/offersCrud';
+import { NostrSyncService, NostrSyncStatus } from './nostrSync';
 
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
@@ -1343,8 +1344,84 @@ app.get('/api/fees/recommended', async (req: Request, res: Response) => {
     }
 });
 
+// 12. Nostr Relay Status Endpoint
+let nostrSync: NostrSyncService | null = null;
+
+app.get('/api/relay/status', (_req: Request, res: Response) => {
+    if (!nostrSync) {
+        return res.json({ connected: false, lastSync: 0, relayCount: 0, relays: [], pubkey: '' });
+    }
+    res.json(nostrSync.getStatus());
+});
+
+// 13. Nostr Relay Config Endpoint
+app.post('/api/relay/config', async (req: Request, res: Response) => {
+    const { relays } = req.body;
+    if (!Array.isArray(relays) || relays.length === 0) {
+        return res.status(400).json({ error: 'relays must be a non-empty array of WebSocket URLs' });
+    }
+
+    // Restart NostrSync with new relay config
+    if (nostrSync) {
+        await nostrSync.stop();
+    }
+
+    const secretKey = process.env.NOSTR_SECRET_KEY || '';
+    nostrSync = new NostrSyncService(relays, secretKey, NETWORK_MODE);
+    await nostrSync.start();
+
+    res.json({ ok: true, relays, pubkey: nostrSync.getStatus().pubkey });
+});
+
+// 14. Offers All (local + remote)
+app.get('/api/offers/all', async (req: Request, res: Response) => {
+    try {
+        const page = Number(req.query.page) || 1;
+        const limit = Number(req.query.limit) || 20;
+
+        const result = await getOffersByMode(NETWORK_MODE, {
+            page,
+            limit,
+            orderBy: 'createdAt',
+            orderDir: 'desc'
+        });
+
+        res.json(result);
+    } catch (err: any) {
+        logError('api.offers.all', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 15. Manual Nostr Sync Trigger
+app.post('/api/offers/sync', async (_req: Request, res: Response) => {
+    if (!nostrSync) {
+        return res.status(503).json({ error: 'Nostr sync not configured' });
+    }
+
+    try {
+        const result = await nostrSync.syncFromRelays();
+        res.json(result);
+    } catch (err: any) {
+        logError('api.offers.sync', { error: err.message });
+        res.status(500).json({ error: err.message });
+    }
+});
+
 async function startServer() {
     await runMigrations();
+
+    // Initialize Nostr sync if configured
+    const nostrRelays = process.env.NOSTR_RELAYS?.split(',').map(r => r.trim()).filter(Boolean);
+    const nostrSecretKey = process.env.NOSTR_SECRET_KEY || '';
+
+    if (nostrRelays && nostrRelays.length > 0 && nostrSecretKey) {
+        nostrSync = new NostrSyncService(nostrRelays, nostrSecretKey, NETWORK_MODE);
+        await nostrSync.start();
+        console.log(`[BOOT] Nostr sync initialized with ${nostrRelays.length} relays. Pubkey: ${nostrSync.getStatus().pubkey}`);
+    } else {
+        console.log('[BOOT] Nostr sync not configured (set NOSTR_RELAYS and NOSTR_SECRET_KEY)');
+    }
 
     if (NETWORK_MODE === 'regtest') {
         await initNodeWallets();
