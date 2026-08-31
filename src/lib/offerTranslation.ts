@@ -1,6 +1,6 @@
 import { finalizeEvent, type Event as NostrEvent, type UnsignedEvent } from 'nostr-tools';
 import { getPublicKey } from 'nostr-tools';
-import { DbOffer } from '../webapp/backend/database/offersCrud';
+import { DbOffer } from '../../webapp/backend/database/offersCrud';
 
 function toBytes(input: Uint8Array | string): Uint8Array {
     if (input instanceof Uint8Array) return input;

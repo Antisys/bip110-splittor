@@ -1,48 +1,26 @@
 {
-  "name": "bip110-splittoooor",
+  "name": "bip110-dex",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "tsx node_modules/.bin/mocha 'tests/**/*.test.ts'",
-    "test:split": "npx ts-node tests/regtest-split-primitive.ts",
-    "test:swap": "npx ts-node tests/regtest-full-swap.ts",
-    "test:refund": "npx ts-node tests/regtest-refund-and-failures.ts",
-    "server": "docker compose up -d && rm -f webapp/backend/bip110_swap_regtest.db && npx ts-node webapp/backend/server.ts",
-    "server:mainnet": "docker compose up -d redis && npx ts-node webapp/backend/server.ts --mainnet",
-    "frontend": "npm run dev --prefix webapp/frontend",
-    "stop": "docker compose down -v && pkill -f ts-node || true"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "description": "Decentralized exchange for BIP-110 coins",
   "type": "commonjs",
+  "scripts": {
+    "dev": "npm run dev --prefix webapp/frontend",
+    "build": "npm run build --prefix webapp/frontend",
+    "test": "tsx node_modules/.bin/mocha 'tests/**/*.test.ts'"
+  },
   "dependencies": {
     "@bitcoinerlab/secp256k1": "^1.2.0",
-    "axios": "^1.18.1",
     "bitcoinjs-lib": "^7.0.1",
-    "cors": "^2.8.6",
     "ecpair": "^3.0.1",
-    "express": "^5.2.1",
-    "nostr-tools": "^2.25.1",
-    "redis": "^5.12.1",
-    "sqlite3": "^6.0.1",
-    "tiny-secp256k1": "^2.2.4",
-    "ws": "^8.21.3"
+    "nostr-tools": "^2.7.0"
   },
   "devDependencies": {
-    "@types/chai": "^5.2.3",
-    "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/mocha": "^10.0.10",
-    "@types/node": "^26.0.1",
-    "@types/sqlite3": "^3.1.11",
-    "@types/ws": "^8.18.1",
-    "chai": "^6.2.2",
-    "mocha": "^11.7.6",
-    "ts-node": "^10.9.2",
-    "tsx": "^4.23.13",
-    "typescript": "^6.0.3",
-    "vite-plugin-node-polyfills": "^0.28.0"
+    "@types/chai": "^4.3.11",
+    "@types/mocha": "^10.0.6",
+    "@types/node": "^20.10.0",
+    "chai": "^4.3.10",
+    "mocha": "^10.2.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.2"
   }
 }
