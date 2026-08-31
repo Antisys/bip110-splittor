@@ -149,7 +149,7 @@ npm run server:mainnet
 RPC mode creates and persists a disabled-private-keys wallet named `watchonly`. Addresses are imported when the frontend first scans them, so the backend must see an address before it receives funds. Preserve the node wallet directory across restarts. Raw transaction lookup on a pruned node only works while the relevant block remains available; transactions cached by Redis remain available to the backend for the configured cache lifetime.
 
 Explorer mode requires chain height, transaction status, address UTXOs, and raw transaction broadcast. Recommended fees may be supplied by either Mempool's `/api/v1/fees/recommended` endpoint or Esplora's `/api/fee-estimates` endpoint.
-Reads from either source are shared through Redis so repeated requests from different clients do not repeatedly hit the upstream. `npm run server:mainnet` starts the bundled Redis service automatically.
+Reads from either source are shared through Redis and a bounded process-local cache, so repeated per-address UTXO requests do not repeatedly hit the upstream. The wallet endpoint retains expired values briefly as display-only stale fallbacks when an explorer is unavailable or rate-limited; transaction-safety checks still fail closed. `npm run server:mainnet` starts the bundled Redis service automatically.
 
 ```bash
 BITCOIN_EXPLORER_URL=https://mempool.space \
@@ -157,10 +157,17 @@ BIP110_EXPLORER_URL=https://your-bip110-mempool.example \
 npm run server:mainnet
 ```
 
+Multiple Bitcoin explorers can be configured as a comma-separated pool. The current request is retried against the next endpoint whenever an explorer returns HTTP 429, and that endpoint remains active until a later 429 rotates the pool again. `BITCOIN_EXPLORER_URL` remains the single-endpoint fallback.
+
+```bash
+BITCOIN_EXPLORER_URLS=https://mempool.space,https://another-esplora.example \
+npm run server:mainnet
+```
+
 Use `REDIS_URL` to point at an external Redis instance. Cache lifetimes can be tuned with
 `EXPLORER_TIP_CACHE_SECONDS`, `EXPLORER_UTXO_CACHE_SECONDS`,
 `EXPLORER_CONFIRMATION_CACHE_SECONDS`, `EXPLORER_RAW_TX_CACHE_SECONDS`, and
-`EXPLORER_FEE_CACHE_SECONDS`. Defaults are 10, 15, 15, 86400, and 30 seconds respectively.
+`EXPLORER_FEE_CACHE_SECONDS`. Defaults are 20, 60, 60, 86400, and 60 seconds respectively.
 
 Coordinator fees are disabled by default. To require funding transactions from makers (initiators)
 and takers (acceptors) to pay the coordinator, configure percentage values and a receive address:

@@ -340,6 +340,8 @@ function TutorialCarousel({ open, onClose }: TutorialCarouselProps) {
 }
 
 export default function App() {
+  const POLL_BASE_MS = 30_000;
+  const WALLET_POLL_EVERY_TICKS = 2;
   // Navigation & Network Mode
   const [activeTab, setActiveTab] = useState<'wallet' | 'splitter' | 'marketplace' | 'my-offers' | 'wizard'>('wallet');
   const [isTutorialOpen, setIsTutorialOpen] = useState(
@@ -1283,22 +1285,28 @@ export default function App() {
     fetchOffers();
   }, [networkMode, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
 
-  // Sync balances and UTXOs when splitAddress, ownAddress or activeTab/networkMode changes
+  // Refresh the wallet when its identity or scan range changes. Tab changes do not
+  // alter wallet data and must not fan out another full multi-address scan.
   useEffect(() => {
     if (splitAddress && ownAddress) {
       fetchBalances();
     }
-  }, [splitAddress, ownAddress, activeTab, networkMode, masterPrivateKey, maxIndex]);
+  }, [splitAddress, ownAddress, networkMode, masterPrivateKey, maxIndex]);
 
-  // Poll node info, marketplace offers, and wallet balances/UTXOs every 10 seconds for active, real-time updates
+  // One coordinator owns all background polling. Lightweight state refreshes every
+  // 30s; the expensive multi-address, cross-chain wallet scan refreshes every 60s.
+  // Hidden tabs issue no polling traffic.
   useEffect(() => {
+    let tick = 0;
     const interval = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      tick += 1;
       fetchNodeInfo();
       fetchOffers();
-      if (splitAddress && ownAddress) {
+      if (tick % WALLET_POLL_EVERY_TICKS === 0 && splitAddress && ownAddress) {
         fetchBalances();
       }
-    }, 10000);
+    }, POLL_BASE_MS);
 
     return () => clearInterval(interval);
   }, [networkMode, splitAddress, ownAddress, masterPrivateKey, maxIndex, offersPage, offersLimit, offersOrderBy, offersOrderDir]);
@@ -1660,7 +1668,6 @@ export default function App() {
       setHasBalanceSnapshot(true);
       setBalanceSyncStatus('ready');
 
-      fetchNodeInfo();
     } catch (err: any) {
       // Publish only complete cross-chain snapshots. A failed refresh must not turn
       // a known wallet into an alarming zero balance or empty UTXO set.

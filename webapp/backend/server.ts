@@ -4,7 +4,7 @@ import axios from 'axios';
 import { ECPairFactory } from 'ecpair';
 import * as ecc from 'tiny-secp256k1';
 import * as bitcoin from 'bitcoinjs-lib';
-import { ExplorerChain, ExplorerRequestError, MempoolExplorerClient } from './explorer';
+import { ExplorerChain, ExplorerRequestError, MempoolExplorerClient, RotatingExplorerClient } from './explorer';
 import { assertCoordinatorFee, loadCoordinatorFeeConfig } from './coordinatorFees';
 import { randomUUID } from 'crypto';
 import { logError, logInfo, logWarn } from './logger';
@@ -38,11 +38,11 @@ const cacheTtl = (name: string, fallback: number): number => {
     return value;
 };
 const EXPLORER_CACHE_TTL = {
-    tip: cacheTtl('EXPLORER_TIP_CACHE_SECONDS', 10),
-    utxos: cacheTtl('EXPLORER_UTXO_CACHE_SECONDS', 15),
-    confirmations: cacheTtl('EXPLORER_CONFIRMATION_CACHE_SECONDS', 15),
+    tip: cacheTtl('EXPLORER_TIP_CACHE_SECONDS', 20),
+    utxos: cacheTtl('EXPLORER_UTXO_CACHE_SECONDS', 60),
+    confirmations: cacheTtl('EXPLORER_CONFIRMATION_CACHE_SECONDS', 60),
     rawTransaction: cacheTtl('EXPLORER_RAW_TX_CACHE_SECONDS', 86400),
-    fees: cacheTtl('EXPLORER_FEE_CACHE_SECONDS', 30)
+    fees: cacheTtl('EXPLORER_FEE_CACHE_SECONDS', 60)
 };
 
 app.use(cors());
@@ -108,8 +108,8 @@ const rateLimiter = (limit: number, windowMs: number) => {
     };
 };
 
-// Accommodates intense parallel loops from multi-index HD wallet balance scans (up to 600 req/min)
-app.use('/api', rateLimiter(600, 60000));
+// Accommodates parallel loops from multi-index HD wallet balance scans (up to 300 req/min)
+app.use('/api', rateLimiter(300, 60000));
 
 // Parse command-line arguments and environment variables for network mode
 const args = process.argv.slice(2);
@@ -122,20 +122,27 @@ console.log(`[BOOT] BIP110 Splittoooor Backend starting up in [${NETWORK_MODE.to
 console.log(`[BOOT] Coordinator fees: maker=${COORDINATOR_FEES.makerFeePercent}%, taker=${COORDINATOR_FEES.takerFeePercent}%.`);
 
 const BITCOIN_EXPLORER_URL = (process.env.BITCOIN_EXPLORER_URL || 'https://mempool.space').trim();
+const BITCOIN_EXPLORER_URLS = (process.env.BITCOIN_EXPLORER_URLS || BITCOIN_EXPLORER_URL)
+    .split(',')
+    .map(url => url.trim())
+    .filter((url, index, urls) => url.length > 0 && urls.indexOf(url) === index);
 const BIP110_EXPLORER_URL = process.env.BIP110_EXPLORER_URL?.trim() || '';
 const BITCOIN_RPC_HOST = process.env.BITCOIN_RPC_HOST?.trim() || '';
 const BIP110_RPC_HOST = process.env.BIP110_RPC_HOST?.trim() || '';
-const mainnetExplorer = BITCOIN_RPC_HOST ? null : new MempoolExplorerClient(BITCOIN_EXPLORER_URL);
+const mainnetExplorer = BITCOIN_RPC_HOST ? null : new RotatingExplorerClient(
+    BITCOIN_EXPLORER_URLS.map(url => new MempoolExplorerClient(url)),
+    (from, to) => logWarn('explorer.rate_limit_failover', { chain: 'main', from, to })
+);
 const bip110Explorer = !BIP110_RPC_HOST && BIP110_EXPLORER_URL
     ? new MempoolExplorerClient(BIP110_EXPLORER_URL)
     : null;
 
 if (NETWORK_MODE === 'mainnet') {
-    console.log(`[BOOT] Bitcoin Mainnet source: [${BITCOIN_RPC_HOST ? 'RPC' : BITCOIN_EXPLORER_URL}]`);
+    console.log(`[BOOT] Bitcoin Mainnet source: [${BITCOIN_RPC_HOST ? 'RPC' : BITCOIN_EXPLORER_URLS.join(', ')}]`);
     console.log(`[BOOT] BIP110 Mainnet source: [${BIP110_RPC_HOST ? 'RPC' : (BIP110_EXPLORER_URL || 'MISSING')}]`);
 }
 
-function getMainnetExplorer(chain: ExplorerChain): MempoolExplorerClient {
+function getMainnetExplorer(chain: ExplorerChain): MempoolExplorerClient | RotatingExplorerClient {
     const explorer = chain === 'main' ? mainnetExplorer : bip110Explorer;
     if (!explorer) throw new Error(`No explorer configured for ${chain}`);
     return explorer;
@@ -379,7 +386,10 @@ app.get('/api/fees/coordinator', (_req: Request, res: Response) => {
 function productionSourceId(chain: ExplorerChain): string {
     const prefix = chain === 'main' ? 'BITCOIN' : 'BIP110';
     const host = chain === 'main' ? BITCOIN_RPC_HOST : BIP110_RPC_HOST;
-    if (!host) return getMainnetExplorer(chain).baseUrl;
+    if (!host) {
+        const explorer = getMainnetExplorer(chain);
+        return explorer instanceof RotatingExplorerClient ? explorer.sourceId : explorer.baseUrl;
+    }
     return `rpc:${host}:${process.env[`${prefix}_RPC_PORT`] || 8332}`;
 }
 
@@ -388,14 +398,15 @@ function cachedProductionRead<T>(
     operation: string,
     parameters: unknown,
     ttlSeconds: number,
-    loader: () => Promise<T>
+    loader: () => Promise<T>,
+    staleIfError = false
 ): Promise<T> {
     return cachedExplorerRead(operation, {
         network: NETWORK_MODE,
         chain,
         explorer: productionSourceId(chain),
         parameters
-    }, ttlSeconds, loader);
+    }, ttlSeconds, loader, staleIfError);
 }
 
 async function currentChainHeight(chain: ExplorerChain): Promise<number> {
@@ -1083,7 +1094,7 @@ app.post('/api/wallet/utxos', async (req: Request, res: Response) => {
 
     if (mode === 'mainnet') {
         try {
-            const utxos = await cachedProductionRead(chain, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, () => getProductionUtxos(chain, address));
+            const utxos = await cachedProductionRead(chain, 'address-utxos', { address }, EXPLORER_CACHE_TTL.utxos, () => getProductionUtxos(chain, address), true);
             return res.json({ address, chain, utxos });
         } catch (err: any) {
             return sendExplorerError(res, err, `${chain} UTXO lookup`);

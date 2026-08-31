@@ -222,3 +222,68 @@ export class MempoolExplorerClient {
         console.log(`[BOOT] ${name} explorer health check passed: ${this.baseUrl}`);
     }
 }
+
+export class RotatingExplorerClient {
+    readonly sourceId: string;
+    private activeIndex = 0;
+
+    constructor(
+        private readonly clients: MempoolExplorerClient[],
+        private readonly onRotate?: (from: string, to: string) => void
+    ) {
+        if (clients.length === 0) throw new Error('At least one explorer endpoint is required');
+        this.sourceId = clients.map(client => client.baseUrl).join(',');
+    }
+
+    get baseUrl(): string {
+        return this.clients[this.activeIndex].baseUrl;
+    }
+
+    private async request<T>(operation: (client: MempoolExplorerClient) => Promise<T>): Promise<T> {
+        let lastError: unknown;
+        for (let attempt = 0; attempt < this.clients.length; attempt++) {
+            const client = this.clients[this.activeIndex];
+            try {
+                return await operation(client);
+            } catch (error) {
+                lastError = error;
+                if (!(error instanceof ExplorerRequestError) || error.status !== 429 || this.clients.length === 1) {
+                    throw error;
+                }
+                const from = client.baseUrl;
+                this.activeIndex = (this.activeIndex + 1) % this.clients.length;
+                this.onRotate?.(from, this.clients[this.activeIndex].baseUrl);
+            }
+        }
+        throw lastError;
+    }
+
+    getTransactionConfirmations(txid: string): Promise<number> {
+        return this.request(client => client.getTransactionConfirmations(txid));
+    }
+
+    getRawTransaction(txid: string): Promise<string> {
+        return this.request(client => client.getRawTransaction(txid));
+    }
+
+    getAddressUtxos(address: string): Promise<ExplorerUtxo[]> {
+        return this.request(client => client.getAddressUtxos(address));
+    }
+
+    broadcastTransaction(hex: string): Promise<string> {
+        return this.request(client => client.broadcastTransaction(hex));
+    }
+
+    getTipHeight(): Promise<number> {
+        return this.request(client => client.getTipHeight());
+    }
+
+    getRecommendedFees(): Promise<RecommendedFees> {
+        return this.request(client => client.getRecommendedFees());
+    }
+
+    async assertHealthy(name: string): Promise<void> {
+        await Promise.all([this.getTipHeight(), this.getRecommendedFees()]);
+        console.log(`[BOOT] ${name} explorer health check passed: ${this.baseUrl}`);
+    }
+}

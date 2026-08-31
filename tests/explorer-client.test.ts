@@ -1,10 +1,61 @@
 import { expect } from 'chai';
 import {
     ExplorerRequestError,
-    MempoolExplorerClient
+    MempoolExplorerClient,
+    RotatingExplorerClient
 } from '../webapp/backend/explorer';
 
 describe('Production Mempool explorer client', () => {
+    it('rotates through configured explorers after each HTTP 429', async () => {
+        const requests: string[] = [];
+        let firstRateLimited = true;
+        let secondRateLimited = false;
+        const response = { data: [] };
+        const rateLimit = () => Promise.reject({ message: 'rate limited', response: { status: 429 } });
+        const firstHttp = {
+            get: async (url: string) => {
+                requests.push(url);
+                if (firstRateLimited) {
+                    firstRateLimited = false;
+                    return rateLimit();
+                }
+                return response;
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const secondHttp = {
+            get: async (url: string) => {
+                requests.push(url);
+                if (secondRateLimited) {
+                    secondRateLimited = false;
+                    return rateLimit();
+                }
+                return response;
+            },
+            post: async () => ({ data: '' })
+        } as any;
+        const rotations: string[] = [];
+        const pool = new RotatingExplorerClient([
+            new MempoolExplorerClient('https://one.example', firstHttp),
+            new MempoolExplorerClient('https://two.example', secondHttp)
+        ], (from, to) => rotations.push(`${from}->${to}`));
+
+        expect(await pool.getAddressUtxos('bc1ptest')).to.deep.equal([]);
+        secondRateLimited = true;
+        expect(await pool.getAddressUtxos('bc1ptest')).to.deep.equal([]);
+
+        expect(requests).to.deep.equal([
+            'https://one.example/api/address/bc1ptest/utxo',
+            'https://two.example/api/address/bc1ptest/utxo',
+            'https://two.example/api/address/bc1ptest/utxo',
+            'https://one.example/api/address/bc1ptest/utxo'
+        ]);
+        expect(rotations).to.deep.equal([
+            'https://one.example->https://two.example',
+            'https://two.example->https://one.example'
+        ]);
+    });
+
     it('normalizes the base URL and uses the transaction status endpoint', async () => {
         const requests: string[] = [];
         const http = {
