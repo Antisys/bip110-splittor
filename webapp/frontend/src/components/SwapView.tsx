@@ -60,21 +60,33 @@ export function SwapView({ swaps }: SwapViewProps) {
                   </div>
                 </div>
 
-                {swap.preimage && (
-                  <div className="text-xs">
-                    <span className="text-slate-500">Preimage: </span>
-                    <code className="font-mono bg-slate-800 px-1 rounded break-all">
-                      {swap.preimage}
-                    </code>
+                {swap.htlcAddress && (
+                  <div className="bg-slate-800 rounded-lg p-3 space-y-1">
+                    <div className="text-xs text-green-400 font-medium">HTLC ADDRESS (send funds here)</div>
+                    <div className="font-mono text-sm text-white break-all select-all">
+                      {swap.htlcAddress}
+                    </div>
                   </div>
                 )}
 
-                {swap.hashLock && (
-                  <div className="text-xs">
-                    <span className="text-slate-500">HashLock: </span>
-                    <code className="font-mono bg-slate-800 px-1 rounded break-all">
-                      {swap.hashLock}
-                    </code>
+                <div className="grid grid-cols-2 gap-4 text-xs text-slate-500">
+                  {swap.preimage && (
+                    <div>
+                      <span>Preimage: </span>
+                      <code className="font-mono break-all block mt-1 text-slate-400">{swap.preimage}</code>
+                    </div>
+                  )}
+                  {swap.hashLock && (
+                    <div>
+                      <span>HashLock: </span>
+                      <code className="font-mono break-all block mt-1 text-slate-400">{swap.hashLock}</code>
+                    </div>
+                  )}
+                </div>
+
+                {swap.lockTime && (
+                  <div className="text-xs text-slate-600">
+                    Locktime: {swap.lockTime} blocks
                   </div>
                 )}
 
