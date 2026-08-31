@@ -15,7 +15,7 @@ interface AppConfig {
 }
 
 const defaultConfig: AppConfig = {
-  relays: ['wss://relay.damus.io'],
+  relays: ['wss://nos.lol', 'wss://relay.damus.io'],
   b110Rpc: { host: '127.0.0.1', port: 18443, user: 'user', pass: 'password' },
   mainRpc: { host: '127.0.0.1', port: 18443, user: 'user', pass: 'password' }
 };
