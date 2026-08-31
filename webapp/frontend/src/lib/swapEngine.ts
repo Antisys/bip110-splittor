@@ -12,7 +12,7 @@ interface RpcConfig {
   pass: string;
 }
 
-interface SwapState {
+export interface SwapState {
   id: string;
   offerId: string;
   side: 'sell_b110' | 'buy_b110';

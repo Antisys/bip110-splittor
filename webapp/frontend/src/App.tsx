@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { NostrClient, SwapOffer } from './lib/nostrClient';
-import { SwapEngine } from './lib/swapEngine';
+import { SwapEngine, SwapState } from './lib/swapEngine';
 import { MarketView } from './components/MarketView';
 import { CreateOffer } from './components/CreateOffer';
 import { SwapView } from './components/SwapView';
@@ -29,6 +29,7 @@ export default function App() {
   const [client, setClient] = useState<NostrClient | null>(null);
   const [engine, setEngine] = useState<SwapEngine | null>(null);
   const [offers, setOffers] = useState<SwapOffer[]>([]);
+  const [swaps, setSwaps] = useState<SwapState[]>([]);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
@@ -82,8 +83,9 @@ export default function App() {
 
   const acceptOffer = async (offer: SwapOffer) => {
     if (!engine) return;
-    console.log('Accepting offer:', offer);
-    // TODO: initiate swap flow
+    const swap = engine.initiateSwap(offer.id, offer.side);
+    setSwaps(prev => [swap, ...prev]);
+    setTab('swaps');
   };
 
   return (
@@ -141,7 +143,41 @@ export default function App() {
           <CreateOffer onPublish={publishOffer} />
         )}
         {tab === 'swaps' && (
-          <SwapView />
+          <SwapView
+            swaps={swaps}
+            onFund={async (swapId) => {
+              if (!engine) return;
+              const swap = swaps.find(s => s.id === swapId);
+              if (!swap) return;
+              const offer = offers.find(o => o.id === swap.offerId);
+              if (!offer) return;
+              try {
+                const amount = swap.side === 'sell_b110' ? offer.btcAmount : offer.b110Amount;
+                await engine.fundSwap(swapId, amount);
+                setSwaps(prev => prev.map(s => s.id === swapId ? engine.getSwap(swapId)! : s));
+              } catch (e) {
+                console.error('Fund failed:', e);
+              }
+            }}
+            onClaim={async (swapId) => {
+              if (!engine) return;
+              try {
+                await engine.claimSwap(swapId);
+                setSwaps(prev => prev.map(s => s.id === swapId ? engine.getSwap(swapId)! : s));
+              } catch (e) {
+                console.error('Claim failed:', e);
+              }
+            }}
+            onRefund={async (swapId) => {
+              if (!engine) return;
+              try {
+                await engine.refundSwap(swapId);
+                setSwaps(prev => prev.map(s => s.id === swapId ? engine.getSwap(swapId)! : s));
+              } catch (e) {
+                console.error('Refund failed:', e);
+              }
+            }}
+          />
         )}
         {tab === 'settings' && (
           <Settings config={config} onChange={setConfig} pubkey={client?.getPubkey() || ''} />
