@@ -10,14 +10,10 @@ type Tab = 'market' | 'create' | 'swaps' | 'settings';
 
 interface AppConfig {
   relays: string[];
-  b110Rpc: { host: string; port: number; user: string; pass: string };
-  mainRpc: { host: string; port: number; user: string; pass: string };
 }
 
 const defaultConfig: AppConfig = {
-  relays: ['wss://nos.lol', 'wss://relay.damus.io'],
-  b110Rpc: { host: '127.0.0.1', port: 18443, user: 'user', pass: 'password' },
-  mainRpc: { host: '127.0.0.1', port: 18443, user: 'user', pass: 'password' }
+  relays: ['wss://nos.lol', 'wss://relay.damus.io']
 };
 
 export default function App() {
@@ -54,9 +50,9 @@ export default function App() {
   }, [config.relays]);
 
   const initEngine = useCallback(() => {
-    const e = new SwapEngine(config.b110Rpc, config.mainRpc);
+    const e = new SwapEngine();
     setEngine(e);
-  }, [config]);
+  }, []);
 
   useEffect(() => {
     initClient();
@@ -83,7 +79,11 @@ export default function App() {
 
   const acceptOffer = async (offer: SwapOffer) => {
     if (!engine) return;
-    const swap = engine.initiateSwap(offer.id, offer.side);
+    const swap = engine.initiateSwap(offer.id, offer.side, {
+      btc: offer.btcAmount,
+      b110: offer.b110Amount,
+      network: offer.network
+    });
     setSwaps(prev => [swap, ...prev]);
     setTab('swaps');
   };
@@ -143,41 +143,7 @@ export default function App() {
           <CreateOffer onPublish={publishOffer} />
         )}
         {tab === 'swaps' && (
-          <SwapView
-            swaps={swaps}
-            onFund={async (swapId) => {
-              if (!engine) return;
-              const swap = swaps.find(s => s.id === swapId);
-              if (!swap) return;
-              const offer = offers.find(o => o.id === swap.offerId);
-              if (!offer) return;
-              try {
-                const amount = swap.side === 'sell_b110' ? offer.btcAmount : offer.b110Amount;
-                await engine.fundSwap(swapId, amount);
-                setSwaps(prev => prev.map(s => s.id === swapId ? engine.getSwap(swapId)! : s));
-              } catch (e) {
-                console.error('Fund failed:', e);
-              }
-            }}
-            onClaim={async (swapId) => {
-              if (!engine) return;
-              try {
-                await engine.claimSwap(swapId);
-                setSwaps(prev => prev.map(s => s.id === swapId ? engine.getSwap(swapId)! : s));
-              } catch (e) {
-                console.error('Claim failed:', e);
-              }
-            }}
-            onRefund={async (swapId) => {
-              if (!engine) return;
-              try {
-                await engine.refundSwap(swapId);
-                setSwaps(prev => prev.map(s => s.id === swapId ? engine.getSwap(swapId)! : s));
-              } catch (e) {
-                console.error('Refund failed:', e);
-              }
-            }}
-          />
+          <SwapView swaps={swaps} />
         )}
         {tab === 'settings' && (
           <Settings config={config} onChange={setConfig} pubkey={client?.getPubkey() || ''} />
