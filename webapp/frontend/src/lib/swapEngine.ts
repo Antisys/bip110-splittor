@@ -5,6 +5,8 @@ import { ECPairFactory } from 'ecpair';
 bitcoin.initEccLib(ecc);
 const ECPair = ECPairFactory(ecc);
 
+const MIN_LOCKTIME_OFFSET_BLOCKS = 288;
+
 export interface SwapState {
   id: string;
   offerId: string;
@@ -12,16 +14,34 @@ export interface SwapState {
   status: 'pending' | 'funded' | 'claimed' | 'refunded';
   htlcAddress?: string;
   fundTxid?: string;
+  fundVout?: number;
   claimTxid?: string;
+  refundTxid?: string;
   preimage?: string;
   hashLock?: string;
   claimPubKey?: string;
+  claimPrivKey?: string;
   refundPubKey?: string;
+  refundPrivKey?: string;
   btcAmount?: number;
   b110Amount?: number;
   network?: string;
   lockTime?: number;
+  controlBlock?: string;
+  claimScriptHex?: string;
+  refundScriptHex?: string;
   createdAt: number;
+}
+
+export interface InputInfo {
+  txid: string;
+  vout: number;
+  value: number;
+}
+
+export interface OutputInfo {
+  address: string;
+  value: number;
 }
 
 export class SwapEngine {
@@ -47,7 +67,31 @@ export class SwapEngine {
     return bitcoin.networks.regtest;
   }
 
-  createHtlcAddress(hashLockHex: string, claimPubKey: Buffer, refundPubKey: Buffer, lockTime: number, network: bitcoin.Network): string {
+  private computeTapleafHash(script: Buffer): Buffer {
+    const prefix = Buffer.concat([
+      Buffer.from([0xc0]),
+      Buffer.from([script.length]),
+      script
+    ]);
+    return Buffer.from(bitcoin.crypto.taggedHash('TapLeaf', prefix));
+  }
+
+  private computeControlBlock(
+    internalPubKey: Buffer,
+    leafScript: Buffer,
+    siblingScript: Buffer
+  ): Buffer {
+    const leafVersion = Buffer.from([0xc0]);
+    const merkleProof = this.computeTapleafHash(siblingScript);
+    return Buffer.concat([internalPubKey, leafVersion, merkleProof]);
+  }
+
+  createHtlcAddress(hashLockHex: string, claimPubKey: Buffer, refundPubKey: Buffer, lockTime: number, network: bitcoin.Network): {
+    address: string;
+    controlBlock: string;
+    claimScriptHex: string;
+    refundScriptHex: string;
+  } {
     const hashLock = Buffer.from(hashLockHex, 'hex');
 
     const claimScript = bitcoin.script.compile([
@@ -78,7 +122,12 @@ export class SwapEngine {
       network
     });
 
-    return payment.address!;
+    return {
+      address: payment.address!,
+      controlBlock: payment.controlBlock!.toString('hex'),
+      claimScriptHex: claimScript.toString('hex'),
+      refundScriptHex: refundScript.toString('hex')
+    };
   }
 
   initiateSwap(offerId: string, side: 'sell_b110' | 'buy_b110', amounts?: { btc: number; b110: number; network: string }): SwapState {
@@ -90,7 +139,7 @@ export class SwapEngine {
     const claimKeyPair = ECPair.makeRandom({ network });
     const refundKeyPair = ECPair.makeRandom({ network });
 
-    const htlcAddress = this.createHtlcAddress(
+    const { address, controlBlock, claimScriptHex, refundScriptHex } = this.createHtlcAddress(
       hashLock,
       claimKeyPair.publicKey,
       refundKeyPair.publicKey,
@@ -106,8 +155,13 @@ export class SwapEngine {
       preimage,
       hashLock,
       claimPubKey: claimKeyPair.publicKey.toString('hex'),
+      claimPrivKey: claimKeyPair.toWIF(),
       refundPubKey: refundKeyPair.publicKey.toString('hex'),
-      htlcAddress,
+      refundPrivKey: refundKeyPair.toWIF(),
+      htlcAddress: address,
+      controlBlock,
+      claimScriptHex,
+      refundScriptHex,
       btcAmount: amounts?.btc,
       b110Amount: amounts?.b110,
       network: amounts?.network,
@@ -116,7 +170,120 @@ export class SwapEngine {
     };
 
     this.swaps.set(id, swap);
+    this.saveSwaps();
     return swap;
+  }
+
+  buildClaimPsbt(swapId: string, inputs: InputInfo[], outputs: OutputInfo[]): string {
+    const swap = this.swaps.get(swapId);
+    if (!swap) throw new Error('Swap not found');
+    if (!swap.preimage || !swap.claimPrivKey || !swap.claimScriptHex || !swap.controlBlock) {
+      throw new Error('Swap missing claim data');
+    }
+
+    const network = this.getNetwork(swap.network);
+    const claimKeyPair = ECPair.fromWIF(swap.claimPrivKey, network);
+    const claimScript = Buffer.from(swap.claimScriptHex, 'hex');
+    const controlBlock = Buffer.from(swap.controlBlock, 'hex');
+    const preimage = Buffer.from(swap.preimage, 'hex');
+
+    const psbt = new bitcoin.Psbt({ network });
+
+    for (const input of inputs) {
+      psbt.addInput({
+        hash: input.txid,
+        index: input.vout,
+        witnessUtxo: {
+          script: Buffer.from(bitcoin.address.toOutputScript(swap.htlcAddress!, network)),
+          value: input.value
+        },
+        tapScriptSig: [{
+          pubkey: claimKeyPair.publicKey.subarray(1, 33),
+          hash: bitcoin.crypto.hash160(claimScript)
+        }]
+      });
+    }
+
+    for (const output of outputs) {
+      psbt.addOutput({
+        address: output.address,
+        value: output.value
+      });
+    }
+
+    psbt.signAllInputs(claimKeyPair);
+
+    const claimWitness = Buffer.concat([
+      Buffer.from([0x00]),
+      Buffer.from([preimage.length]),
+      preimage,
+      claimScript,
+      controlBlock
+    ]);
+
+    for (let i = 0; i < inputs.length; i++) {
+      psbt.updateInput(i, {
+        finalScriptWitness: [claimWitness]
+      });
+    }
+
+    return psbt.toBase64();
+  }
+
+  buildRefundPsbt(swapId: string, inputs: InputInfo[], outputs: OutputInfo[]): string {
+    const swap = this.swaps.get(swapId);
+    if (!swap) throw new Error('Swap not found');
+    if (!swap.refundPrivKey || !swap.refundScriptHex || !swap.controlBlock) {
+      throw new Error('Swap missing refund data');
+    }
+
+    const network = this.getNetwork(swap.network);
+    const refundKeyPair = ECPair.fromWIF(swap.refundPrivKey, network);
+    const refundScript = Buffer.from(swap.refundScriptHex, 'hex');
+    const controlBlock = Buffer.from(swap.controlBlock, 'hex');
+
+    const psbt = new bitcoin.Psbt({ network });
+
+    psbt.setLocktime(swap.lockTime!);
+
+    for (const input of inputs) {
+      psbt.addInput({
+        hash: input.txid,
+        index: input.vout,
+        sequence: 0xfffffffe,
+        witnessUtxo: {
+          script: Buffer.from(bitcoin.address.toOutputScript(swap.htlcAddress!, network)),
+          value: input.value
+        },
+        tapScriptSig: [{
+          pubkey: refundKeyPair.publicKey.subarray(1, 33),
+          hash: bitcoin.crypto.hash160(refundScript)
+        }]
+      });
+    }
+
+    for (const output of outputs) {
+      psbt.addOutput({
+        address: output.address,
+        value: output.value
+      });
+    }
+
+    psbt.signAllInputs(refundKeyPair);
+
+    const refundWitness = Buffer.concat([
+      Buffer.from([0x00]),
+      refundScript,
+      controlBlock
+    ]);
+
+    for (let i = 0; i < inputs.length; i++) {
+      psbt.updateInput(i, {
+        finalScriptWitness: [refundWitness]
+      });
+    }
+
+    return psbt.toBase64();
   }
 
   getSwap(id: string): SwapState | undefined {
@@ -132,6 +299,22 @@ export class SwapEngine {
     const swap = this.swaps.get(id);
     if (!swap) return undefined;
     Object.assign(swap, updates);
+    this.saveSwaps();
     return swap;
+  }
+
+  private saveSwaps() {
+    const data = Array.from(this.swaps.values());
+    localStorage.setItem('bip110-dex-swaps', JSON.stringify(data));
+  }
+
+  loadSwaps() {
+    const raw = localStorage.getItem('bip110-dex-swaps');
+    if (raw) {
+      const data: SwapState[] = JSON.parse(raw);
+      for (const s of data) {
+        this.swaps.set(s.id, s);
+      }
+    }
   }
 }

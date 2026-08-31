@@ -51,6 +51,8 @@ export default function App() {
 
   const initEngine = useCallback(() => {
     const e = new SwapEngine();
+    e.loadSwaps();
+    setSwaps(e.getAllSwaps());
     setEngine(e);
   }, []);
 
