@@ -112,25 +112,8 @@ async function runRefundAndFailureTest() {
     await sleep(1000); // sync
     console.log(`   - Block 101 Mined. Funding TxID: ${fundTxid}`);
 
-    // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
-    console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
-    console.log("   - Nodes are fully connected over P2P initially.");
-    console.log("   - We will mine the OP_IF block on Core and let Knots reject it natively.");
-
-    const outputIndex = await findOutputIndex(mainRpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
-    const receiverAddrMain = await mainRpc.call('getnewaddress');
-    const mainSpendTx = PureBitcoinSwap.buildScriptpathSplitTx(
-        initiator, fundTxid, outputIndex, 1000000000n, 999000000n, receiverAddrMain, splitPayment, splitScript, bitcoin.networks.regtest
-    );
-    const rawMainHex = mainSpendTx.toHex();
-    await mainRpc.call('sendrawtransaction', [rawMainHex]);
-    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-
-    console.log("   - Knots natively rejects the invalid block containing OP_IF (BIP110 consensus enforced).");
-    await sleep(2000);
-
-    // 6. Split coins on BIP110-Chain using Keypath Schnorr spend
-    console.log("\n6. Splitting coins on BIP110-Chain...");
+    // 5. Split on the BLAKE2b chain with the fork-only unified digest.
+    console.log("\n5. Splitting coins with SIGHASH_UNIFIED on the BLAKE2b chain...");
     const outputIndexBip110 = await findOutputIndex(bip110Rpc, fundTxid, Buffer.from(splitPayment.output!).toString('hex'));
     const initSplitDestPayment = bitcoin.payments.p2tr({
         internalPubkey: PureBitcoinSwap.getXOnlyPubKey(Buffer.from(initiator.publicKey)),
@@ -138,7 +121,7 @@ async function runRefundAndFailureTest() {
     });
     const initSplitDestAddr = initSplitDestPayment.address!;
 
-    const bip110SplitTx = PureBitcoinSwap.buildKeypathSplitTx(
+    const bip110SplitTx = PureBitcoinSwap.buildUnifiedSplitTx(
         initiator, fundTxid, outputIndexBip110, 1000000000n, 999000000n, initSplitDestAddr, splitPayment, splitScript, bitcoin.networks.regtest
     );
     const splitTxidBip110 = await bip110Rpc.call('sendrawtransaction', [bip110SplitTx.toHex()]);
@@ -169,7 +152,7 @@ async function runRefundAndFailureTest() {
     const initSplitOutIdxBip110Tx = await findOutputIndex(bip110Rpc, splitTxidBip110, initSplitDestScriptHexBip110);
 
     const htlcFundTxBip110 = PureBitcoinSwap.buildHtlcFundingTx(
-        initiator, splitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), undefined, 5000n, bitcoin.networks.regtest
+        initiator, splitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), initSplitDestAddr, 5000n, bitcoin.networks.regtest
     );
     const htlcFundTxidBip110 = await bip110Rpc.call('sendrawtransaction', [htlcFundTxBip110.toHex()]);
     await bip110Rpc.call('generatetoaddress', [1, minerAddrBip110]);

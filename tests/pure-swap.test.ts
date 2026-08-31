@@ -1,6 +1,7 @@
 import { expect } from 'chai';
 import { PureBitcoinSwap } from '../src/lib/PureBitcoinSwap';
 import * as bitcoin from 'bitcoinjs-lib';
+import { hashForUnifiedKeypath, SIGHASH_ALL_UNIFIED } from '../src/lib/unifiedSighash';
 
 describe('Pure Bitcoinjs-Lib Optimized Swap Tests', () => {
     // Generate roles
@@ -18,24 +19,20 @@ describe('Pure Bitcoinjs-Lib Optimized Swap Tests', () => {
     // Timelocks
     const lockTime = 2000; // Block height
 
-    it('1. Split Script should compile to the exact opcode gating sequence', () => {
+    it('1. Split deposit leaf is inert and contains no legacy fork-gating conditionals', () => {
         const splitScript = PureBitcoinSwap.createSplitScript(initiatorPubKey);
         const decompiled = bitcoin.script.decompile(splitScript);
+        expect(decompiled).to.deep.equal([bitcoin.opcodes.OP_RETURN]);
+    });
 
-        expect(decompiled).to.not.be.null;
-        const opcodes = decompiled!;
-
-        expect(opcodes[0]).to.equal(bitcoin.opcodes.OP_IF);
-        expect(opcodes[1]).to.equal(bitcoin.opcodes.OP_RETURN);
-        expect(opcodes[2]).to.equal(bitcoin.opcodes.OP_ELSE);
-        
-        // Public key is at index 3
-        expect(Buffer.isBuffer(opcodes[3])).to.be.true;
-        expect((opcodes[3] as Buffer).length).to.equal(32); // Must be X-only (32 bytes)
-        expect((opcodes[3] as Buffer).toString('hex')).to.equal(PureBitcoinSwap.getXOnlyPubKey(initiatorPubKey).toString('hex'));
-
-        expect(opcodes[4]).to.equal(bitcoin.opcodes.OP_CHECKSIG);
-        expect(opcodes[5]).to.equal(bitcoin.opcodes.OP_ENDIF);
+    it('matches the upstream Taproot SIGHASH_ALL|UNIFIED test vector', () => {
+        const transaction = bitcoin.Transaction.fromHex('0100000001c912714ed02bfbe45aa3b7c1f92b3bfc59e94ddb7ea263a3648dbb9c897bd2b403000000000000000002e39d6002000000001514b1a1b9552e930d457b46ee4e0a54a8033d8da9cd69a36c050000000015142d72d2372c8425e95b93dfd296ad9fc276e104cd00000000');
+        const hash = hashForUnifiedKeypath(transaction, 0, [{
+            value: 62739988n,
+            script: Buffer.from('512096e0394492f9208afc6f8249db5a85c7c4b303f0eb4babb53c2a4c60b717fd1f', 'hex')
+        }]);
+        expect(SIGHASH_ALL_UNIFIED).to.equal(0x21);
+        expect(hash.toString('hex')).to.equal('973f75abf22f12402d185957809b0f29c3912d8359a5cff14c0f6709ec4ac88c');
     });
 
     it('2. Claim Script should be exactly 69 bytes with zero conditional opcodes', () => {

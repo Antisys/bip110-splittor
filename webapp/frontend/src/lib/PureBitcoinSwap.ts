@@ -1,6 +1,7 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory, ECPairAPI, ECPairInterface } from 'ecpair';
+import { hashForUnifiedKeypath, SIGHASH_ALL_UNIFIED } from './unifiedSighash';
 
 // Initialize Elliptic Curve library in bitcoinjs-lib for Schnorr and Taproot
 bitcoin.initEccLib(ecc);
@@ -22,23 +23,11 @@ export class PureBitcoinSwap {
         return Buffer.from(bitcoin.crypto.sha256(Buffer.from(preimage, 'utf8')));
     }
 
-    /**
-     * 1. Replay-Protection Split Script (Main-Chain Spend Path)
-     * OP_IF
-     *   OP_RETURN
-     * OP_ELSE
-     *   <pubKey> OP_CHECKSIG
-     * OP_ENDIF
-     */
+    /** Inert leaf used only to separate deposit and ordinary wallet addresses. */
     static createSplitScript(ownerPubKey: Buffer): Buffer {
-        const xOnlyKey = this.getXOnlyPubKey(ownerPubKey);
+        this.getXOnlyPubKey(ownerPubKey);
         return Buffer.from(bitcoin.script.compile([
-            bitcoin.opcodes.OP_IF,
-            bitcoin.opcodes.OP_RETURN,
-            bitcoin.opcodes.OP_ELSE,
-            xOnlyKey,
-            bitcoin.opcodes.OP_CHECKSIG,
-            bitcoin.opcodes.OP_ENDIF
+            bitcoin.opcodes.OP_RETURN
         ]));
     }
 
@@ -159,10 +148,8 @@ export class PureBitcoinSwap {
         return { payment, script, leafHash };
     }
 
-    /**
-     * Builds and signs a Main-Chain Split Spend (Scriptpath spend using OP_IF)
-     */
-    static buildScriptpathSplitTx(
+    /** Build a BLAKE2b-only Taproot key-path spend using SIGHASH_UNIFIED. */
+    static buildUnifiedSplitTx(
         ownerKeyPair: ECPairInterface,
         fundTxid: string,
         outputIndex: number,
@@ -179,50 +166,9 @@ export class PureBitcoinSwap {
         tx.addOutput(bitcoin.address.toOutputScript(destAddr, network), outputSats);
 
         const leafHash = this.tapleafHash(splitScript);
-        const sighash = tx.hashForWitnessV1(
-            0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
-        );
-        const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
-        const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
-        const controlBlock = splitPayment.witness![1];
-
-        tx.setWitness(0, [
-            sig,
-            Buffer.alloc(0), // isBip110 = false (takes the OP_ELSE branch)
-            splitScript,
-            controlBlock
-        ]);
-
-        return tx;
-    }
-
-    /**
-     * Builds and signs a BIP110-Chain Split Spend (Keypath spend via Tweaked Key)
-     */
-    static buildKeypathSplitTx(
-        ownerKeyPair: ECPairInterface,
-        fundTxid: string,
-        outputIndex: number,
-        inputSats: bigint,
-        outputSats: bigint,
-        destAddr: string,
-        splitPayment: bitcoin.payments.Payment,
-        splitScript: Buffer,
-        network: bitcoin.Network = bitcoin.networks.regtest
-    ): bitcoin.Transaction {
-        const tx = new bitcoin.Transaction();
-        tx.version = 2;
-        tx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
-        tx.addOutput(bitcoin.address.toOutputScript(destAddr, network), outputSats);
-
-        const leafHash = this.tapleafHash(splitScript);
-        const sighash = tx.hashForWitnessV1(
-            0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
-        );
-
+        const sighash = hashForUnifiedKeypath(tx, 0, [{ value: inputSats, script: splitPayment.output! }]);
         const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, leafHash, network);
-        const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
-
+        const sig = Buffer.concat([Buffer.from(tweakedPair.signSchnorr(sighash)), Buffer.from([SIGHASH_ALL_UNIFIED])]);
         tx.setWitness(0, [sig]);
 
         return tx;
@@ -500,36 +446,18 @@ export class PureBitcoinSwap {
         }
 
         const pubKey = Buffer.from(ownerKeyPair.publicKey);
+        void isMainChain;
 
         if (isSplitAddress) {
             // Need script tree for split contract
             const splitPaymentInfo = this.createSplitPayment(pubKey, network);
 
-            if (isMainChain) {
-                // Main-Chain split spend uses the OP_IF Scriptpath
-                const leafHash = this.tapleafHash(splitPaymentInfo.script);
-                const sighash = tx.hashForWitnessV1(
-                    0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
-                );
-                const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
-                const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
-
-                const controlBlock = splitPaymentInfo.payment.witness![1];
-                tx.setWitness(0, [
-                    sig,
-                    Buffer.alloc(0), // isBip110 = false (takes the OP_ELSE branch)
-                    splitPaymentInfo.script,
-                    controlBlock
-                ]);
-            } else {
-                // BIP110 split spend uses Keypath (tweaked with Merkle root)
-                const sighash = tx.hashForWitnessV1(
-                    0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
-                );
-                const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, splitPaymentInfo.leafHash, network);
-                const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
-                tx.setWitness(0, [sig]);
-            }
+            const sighash = tx.hashForWitnessV1(
+                0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
+            );
+            const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, splitPaymentInfo.leafHash, network);
+            const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
+            tx.setWitness(0, [sig]);
         } else {
             // Simple P2TR Keypath spend from ownAddress (requires standard TapTweak committing to empty script root)
             const ownPayment = bitcoin.payments.p2tr({

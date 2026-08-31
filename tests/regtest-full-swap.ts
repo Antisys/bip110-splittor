@@ -131,17 +131,14 @@ async function runFullSwapTest() {
     console.log(`   - Height post-funding - Main: ${heightMain2}, BIP110: ${heightBip1102}`);
     console.log(`   - Block 101 Mined. Initiator Funded: ${initFundTxid}. Acceptor Funded: ${accFundTxid}`);
 
-    // 5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS
-    console.log("\n5. ENFORCING CONSENSUS-LEVEL FORK SPLIT VIA KNOTS -CONSENSUSRULES=RDTS");
-    console.log("   - Nodes are fully connected over P2P initially.");
-    console.log("   - We will mine the OP_IF block and then invalidate it on Knots to force the consensus split!");
+    console.log("\n5. BLAKE2b activates at block 102; unified signatures provide native replay protection.");
 
     // ----------------------------------------------------------------
     // Setup 6: Execute the Splits
     // ----------------------------------------------------------------
     console.log("\n6. Splitting coins on both Chains...");
 
-    // Main-Chain Splits (OP_IF Scriptpath Spends)
+    // Locate the shared pre-fork outputs on both nodes.
     const initSplitOutIdxMain = await findOutputIndex(mainRpc, initFundTxid, Buffer.from(initSplitPayment.output!).toString('hex'));
     const accSplitOutIdxMain = await findOutputIndex(mainRpc, accFundTxid, Buffer.from(accSplitPayment.output!).toString('hex'));
 
@@ -158,35 +155,16 @@ async function runFullSwapTest() {
     });
     const accSplitDestAddr = accSplitDestPayment.address!;
 
-    // Build Initiator Main-Chain Split Spend
-    const initMainSplitTx = PureBitcoinSwap.buildScriptpathSplitTx(
-        initiator, initFundTxid, initSplitOutIdxMain, 1000000000n, 999000000n, initSplitDestAddr, initSplitPayment, initSplitScript, bitcoin.networks.regtest
-    );
-
-    // Build Acceptor Main-Chain Split Spend
-    const accMainSplitTx = PureBitcoinSwap.buildScriptpathSplitTx(
-        acceptor, accFundTxid, accSplitOutIdxMain, 1000000000n, 999000000n, accSplitDestAddr, accSplitPayment, accSplitScript, bitcoin.networks.regtest
-    );
-
-    // Broadcast both to Main-Chain
-    const initSplitTxidMain = await mainRpc.call('sendrawtransaction', [initMainSplitTx.toHex()]);
-    const accSplitTxidMain = await mainRpc.call('sendrawtransaction', [accMainSplitTx.toHex()]);
-    await mainRpc.call('generatetoaddress', [1, sharedMinerAddr]);
-    await sleep(2000);
-
-    console.log(`   - Main-Chain Block 102 Mined. Initiator Split UTXO: ${initSplitTxidMain}. Acceptor Split UTXO: ${accSplitTxidMain}`);
-
-    // BIP110-Chain Splits (Keypath Schnorr Spends)
+    // BLAKE2b-chain splits opt into the fork-only unified digest. The original
+    // outpoints remain untouched and spendable on Bitcoin.
     const initSplitOutIdxBip110 = await findOutputIndex(bip110Rpc, initFundTxid, Buffer.from(initSplitPayment.output!).toString('hex'));
     const accSplitOutIdxBip110 = await findOutputIndex(bip110Rpc, accFundTxid, Buffer.from(accSplitPayment.output!).toString('hex'));
 
-    // Build Initiator BIP110 Keypath Split Spend
-    const initBip110SplitTx = PureBitcoinSwap.buildKeypathSplitTx(
+    const initBip110SplitTx = PureBitcoinSwap.buildUnifiedSplitTx(
         initiator, initFundTxid, initSplitOutIdxBip110, 1000000000n, 999000000n, initSplitDestAddr, initSplitPayment, initSplitScript, bitcoin.networks.regtest
     );
 
-    // Build Acceptor BIP110 Keypath Split Spend
-    const accBip110SplitTx = PureBitcoinSwap.buildKeypathSplitTx(
+    const accBip110SplitTx = PureBitcoinSwap.buildUnifiedSplitTx(
         acceptor, accFundTxid, accSplitOutIdxBip110, 1000000000n, 999000000n, accSplitDestAddr, accSplitPayment, accSplitScript, bitcoin.networks.regtest
     );
 
@@ -218,7 +196,7 @@ async function runFullSwapTest() {
     console.log(`   - BIP110-Chain HTLC Address: ${htlcBip110Addr}`);
 
     const htlcFundTxBip110 = PureBitcoinSwap.buildHtlcFundingTx(
-        initiator, initSplitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), undefined, 5000n, bitcoin.networks.regtest
+        initiator, initSplitTxidBip110, initSplitOutIdxBip110Tx, 999000000n, 998000000n, htlcBip110Addr, initSplitDestPayment, Buffer.alloc(0), initSplitDestAddr, 5000n, bitcoin.networks.regtest
     );
 
     const htlcFundTxidBip110 = await bip110Rpc.call('sendrawtransaction', [htlcFundTxBip110.toHex()]);
@@ -226,9 +204,6 @@ async function runFullSwapTest() {
     console.log(`   - BIP110 HTLC Funded. TxID: ${htlcFundTxidBip110}`);
 
     // B. Main-Chain HTLC (funded by Acceptor's split output)
-    const accSplitDestScriptHexMain = Buffer.from(bitcoin.address.toOutputScript(accSplitDestAddr, bitcoin.networks.regtest)).toString('hex');
-    const accSplitOutIdxMainTx = await findOutputIndex(mainRpc, accSplitTxidMain, accSplitDestScriptHexMain);
-
     const htlcMain = PureBitcoinSwap.createTaprootHtlc(
         Buffer.from(acceptor.publicKey), // internal aggregator
         hashLock,
@@ -241,7 +216,7 @@ async function runFullSwapTest() {
     console.log(`   - Main-Chain HTLC Address: ${htlcMainAddr}`);
 
     const htlcFundTxMain = PureBitcoinSwap.buildHtlcFundingTx(
-        acceptor, accSplitTxidMain, accSplitOutIdxMainTx, 999000000n, 998000000n, htlcMainAddr, accSplitDestPayment, Buffer.alloc(0), undefined, 5000n, bitcoin.networks.regtest
+        acceptor, accFundTxid, accSplitOutIdxMain, 1000000000n, 998000000n, htlcMainAddr, accSplitPayment, PureBitcoinSwap.tapleafHash(accSplitScript), accSplitDestAddr, 5000n, bitcoin.networks.regtest
     );
 
     const htlcFundTxidMain = await mainRpc.call('sendrawtransaction', [htlcFundTxMain.toHex()]);

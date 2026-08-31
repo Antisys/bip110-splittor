@@ -180,7 +180,7 @@ const tutorialSteps = [
   {
     eyebrow: '03 / SPLIT THE DEPOSIT',
     title: 'Make each chain independently spendable.',
-    description: 'After the deposit confirms, open “2. Bilateral Splitter.” Select a confirmed unsplit UTXO and press “Split Coins.” Wait for confirmation before using the resulting BTC or BIP110 balance.',
+    description: 'After the shared deposit confirms, activate the BLAKE2b fork, then open “2. Bilateral Splitter.” The unified signature moves only the fork-side coin and leaves the Bitcoin outpoint untouched.',
     note: 'Bilateral Splitter → select UTXO → Split Coins',
     icon: GitFork,
     tone: 'lime'
@@ -408,7 +408,7 @@ export default function App() {
       status: string;
       activationHeight: number | null;
       requiredHeight: number | null;
-      source: 'rpc' | 'height-fallback' | 'unavailable';
+      source: 'rpc' | 'height' | 'unavailable';
     };
     errors?: { main?: string; bip110?: string };
   }>({
@@ -419,9 +419,9 @@ export default function App() {
   const [selectedUtxoToSplit, setSelectedUtxoToSplit] = useState<UTXO | null>(null);
   const [splittingBilateral, setSplittingBilateral] = useState<boolean>(false);
   const [bilateralSplitResult, setBilateralSplitResult] = useState<{
-    mainSuccess?: boolean;
-    mainTxid?: string;
-    mainError?: string;
+    bip110Success?: boolean;
+    bip110Txid?: string;
+    bip110Error?: string;
   } | null>(null);
 
   // Faucet & Block Mining (Regtest only)
@@ -460,6 +460,11 @@ export default function App() {
   const [selectedWithdrawUtxoKey, setSelectedWithdrawUtxoKey] = useState<string>('');
   const [withdrawAmountSats, setWithdrawAmountSats] = useState<string>('');
   const [withdrawing, setWithdrawing] = useState<boolean>(false);
+
+  // BIP110 raw transaction relay state
+  const [relayTransactionHex, setRelayTransactionHex] = useState<string>('');
+  const [relaySubmitting, setRelaySubmitting] = useState<boolean>(false);
+  const [relayResult, setRelayResult] = useState<{ txid: string } | null>(null);
 
   // Toast notifications
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
@@ -980,7 +985,7 @@ export default function App() {
 
   // Dynamically calculate transaction fee in Satoshis depending on active network mode
   const calculateTxFee = async (
-    txType: 'split-script' | 'split-keypath' | 'funding' | 'claim' | 'refund' | 'withdraw',
+    txType: 'split-unified' | 'funding' | 'claim' | 'refund' | 'withdraw',
     hasChange: boolean = false,
     chain: 'main' | 'bip110' = 'main'
   ): Promise<number> => {
@@ -990,7 +995,7 @@ export default function App() {
       if (txType === 'claim') return 2000;
       if (txType === 'refund') return 2000;
       if (txType === 'withdraw') return 5000;
-      return 2000; // split-script / split-keypath
+      return 2000; // unified key-path split
     }
 
     // Mainnet Mode: Fetch feerate from the chain-specific backend proxy.
@@ -1000,11 +1005,8 @@ export default function App() {
 
     let vBytes = 150;
     switch (txType) {
-      case 'split-script':
-        vBytes = 130;
-        break;
-      case 'split-keypath':
-        vBytes = 115;
+      case 'split-unified':
+        vBytes = 112;
         break;
       case 'funding':
         vBytes = hasChange ? 160 : 115;
@@ -1314,6 +1316,49 @@ export default function App() {
   const showToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 5000);
+  };
+
+  const relayPreview = React.useMemo(() => {
+    const hex = relayTransactionHex.trim();
+    if (!hex) return null;
+    if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
+      return { error: 'Enter an even number of hexadecimal characters.' } as const;
+    }
+    try {
+      const tx = bitcoin.Transaction.fromHex(hex);
+      return {
+        txid: tx.getId(),
+        bytes: tx.byteLength(),
+        virtualSize: tx.virtualSize(),
+        inputs: tx.ins.length,
+        outputs: tx.outs.length
+      } as const;
+    } catch {
+      return { error: 'This is not a decodable raw Bitcoin transaction.' } as const;
+    }
+  }, [relayTransactionHex]);
+
+  const submitBip110Transaction = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!relayPreview || 'error' in relayPreview) {
+      showToast('Paste a valid signed raw transaction first.', 'error');
+      return;
+    }
+
+    setRelaySubmitting(true);
+    setRelayResult(null);
+    try {
+      const response = await axios.post(`${API_BASE}/tx/bip110/submit`, {
+        hex: relayTransactionHex.trim()
+      });
+      setRelayResult({ txid: response.data.txid });
+      showToast('Transaction accepted by the BIP110 relay.', 'success');
+    } catch (err: any) {
+      const message = err.response?.data?.error || err.message;
+      showToast(`BIP110 relay rejected the transaction: ${message}`, 'error');
+    } finally {
+      setRelaySubmitting(false);
+    }
   };
 
   const handleDownloadRecoveryFile = async () => {
@@ -1702,19 +1747,19 @@ export default function App() {
     const pubKey = Buffer.from(ownerKeyPair.publicKey);
     const splitPayment = PureBitcoinSwap.createSplitPayment(pubKey, net);
 
-    const feeSats = await calculateTxFee('split-script', false, 'main');
+    const feeSats = await calculateTxFee('split-unified', false, 'bip110');
     const inputSats = BigInt(selectedUtxoToSplit.amount);
     const fee = BigInt(feeSats);
     const outputSats = inputSats - fee;
 
-    let mainTxid = '';
-    let mainError = '';
-    let mainSuccess = false;
+    let bip110Txid = '';
+    let bip110Error = '';
+    let bip110Success = false;
 
-    // We ONLY perform the script-spend split spend on the Main-Chain (Bitcoin Core)
-    // The previous pre-fork UTXO will remain valid and unspent on BIP110-Chain because the split-spend is rejected.
+    // Spend only on the BLAKE2b chain with SIGHASH_UNIFIED. Bitcoin rejects
+    // that signature hash and retains the original pre-fork output.
     try {
-      const txMain = PureBitcoinSwap.buildScriptpathSplitTx(
+      const txBip110 = PureBitcoinSwap.buildUnifiedSplitTx(
         ownerKeyPair,
         selectedUtxoToSplit.txid,
         selectedUtxoToSplit.vout,
@@ -1726,29 +1771,29 @@ export default function App() {
         net
       );
 
-      const resMain = await axios.post(`${API_BASE}/tx/broadcast`, {
-        hex: txMain.toHex(),
-        chain: 'main',
+      const resBip110 = await axios.post(`${API_BASE}/tx/broadcast`, {
+        hex: txBip110.toHex(),
+        chain: 'bip110',
         networkMode,
         isSplit: true
       });
 
-      mainTxid = resMain.data.txid;
-      mainSuccess = true;
+      bip110Txid = resBip110.data.txid;
+      bip110Success = true;
     } catch (err: any) {
-      mainError = err.message;
+      bip110Error = err.message;
     }
 
     setBilateralSplitResult({
-      mainSuccess,
-      mainTxid,
-      mainError
+      bip110Success,
+      bip110Txid,
+      bip110Error
     });
 
-    if (mainSuccess) {
-      showToast('Scriptpath split successfully broadcasted on Main-Chain! BIP110 previous UTXO is now marked as split.', 'success');
+    if (bip110Success) {
+      showToast('Unified split broadcast on the BLAKE2b chain. The original output remains on Bitcoin.', 'success');
     } else {
-      showToast('Bilateral split failed: ' + mainError, 'error');
+      showToast('Bilateral split failed: ' + bip110Error, 'error');
     }
 
     setSelectedUtxoToSplit(null);
@@ -2442,10 +2487,10 @@ export default function App() {
     showToast('Copied to clipboard!', 'success');
   };
 
-  const blockLead = nodeInfo.mainHeight - nodeInfo.bip110Height;
-  const isActivationLockout = !nodeInfo.bip110Activation.ready;
-  const isWorkLeadLockout = nodeInfo.mainHeight > 0 && nodeInfo.bip110Height > 0 && blockLead > 0 && blockLead < 10;
-  const isLockoutActive = isActivationLockout || isWorkLeadLockout;
+  // The BLAKE2b fork has its own proof-of-work, so relative block heights are
+  // not a meaningful reorg-safety signal between these chains.
+  const isActivationLockout = networkMode === 'mainnet' && !nodeInfo.bip110Activation.ready;
+  const isLockoutActive = isActivationLockout;
 
   return (
     <div className="app-shell min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
@@ -2650,14 +2695,14 @@ export default function App() {
             <div className="space-y-2">
               <h2 className="text-xl md:text-2xl font-bold tracking-tight text-amber-300">
                 {isActivationLockout
-                  ? 'BIP110 Consensus Rules Are Not Active Yet'
-                  : 'Consensus Safety Lockout: Insufficient Main-Chain Work Advantage'}
+                  ? 'BLAKE2b Consensus Rules Are Not Active Yet'
+                  : 'Chain State Unavailable'}
               </h2>
               <p className="text-sm text-slate-400 max-w-xl mx-auto leading-relaxed">
                 {isActivationLockout ? (
-                  <>Deposits, wallet actions, splitting, offers, and swaps are disabled until the connected Knots node reports the <strong className="text-amber-400">reduced_data deployment as ACTIVE</strong>. Miner signaling or LOCKED_IN status alone does not enforce BIP110's consensus rules.</>
+                  <>Deposits, wallet actions, splitting, offers, and swaps are disabled until the Knots chain reaches BLAKE2b activation.</>
                 ) : (
-                  <>BIP110 Knots enforces a strict subset of Bitcoin Core consensus rules. Since any block produced by a BIP110 node is automatically valid on the Main-Chain, the Core chain must maintain at least a <strong className="text-amber-400">10-block lead</strong> to prevent reorg, block replay, or chain separation vulnerabilities.</>
+                  <>The backend cannot establish the BLAKE2b chain state.</>
                 )}
               </p>
             </div>
@@ -2672,49 +2717,23 @@ export default function App() {
                 <span className="text-md font-extrabold text-sky-400 font-mono">{nodeInfo.bip110Height} blocks</span>
               </div>
               <div className="col-span-2 sm:col-span-1 bg-slate-950/80 border border-amber-950/40 px-4 py-3 rounded-xl flex flex-col justify-center">
-                <span className="text-[10px] text-amber-500/80 uppercase block font-bold mb-0.5">{isActivationLockout ? 'Deployment State' : 'Current Lead'}</span>
+                <span className="text-[10px] text-amber-500/80 uppercase block font-bold mb-0.5">{isActivationLockout ? 'Activation State' : 'Current Lead'}</span>
                 <span className={`text-md font-extrabold font-mono ${!isActivationLockout && nodeInfo.mainHeight - nodeInfo.bip110Height >= 10 ? 'text-emerald-400' : 'text-rose-400 animate-pulse'}`}>
-                  {isActivationLockout ? nodeInfo.bip110Activation.status.toUpperCase() : `${nodeInfo.mainHeight - nodeInfo.bip110Height} / 10`}
+                  {nodeInfo.bip110Activation.status.toUpperCase()}
                 </span>
               </div>
             </div>
 
-            {isActivationLockout && networkMode === 'regtest' ? (
-              <div className="pt-6 w-full max-w-xs">
-                <button
-                  onClick={() => mineBlocks('bip110', 450)}
-                  className="w-full py-3 bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white font-semibold text-sm rounded-xl shadow-xl shadow-indigo-600/10 transition-all flex items-center justify-center gap-2 group"
-                >
-                  <Sparkles className="w-4 h-4 text-amber-300 group-hover:scale-110 transition-transform animate-pulse" />
-                  Mine 450 Blocks to Activate
-                </button>
-                <span className="text-[10px] text-slate-500 block mt-2.5 leading-normal">
-                  Regtest only: advance both connected chains through the deployment periods, then re-check Knots' consensus state.
-                </span>
-              </div>
-            ) : networkMode === 'regtest' ? (
-              <div className="pt-6 w-full max-w-xs">
-                <button
-                  onClick={() => mineBlocks('main', 10)}
-                  className="w-full py-3 bg-gradient-to-r from-amber-600 to-indigo-600 hover:from-amber-500 hover:to-indigo-500 text-white font-semibold text-sm rounded-xl shadow-xl shadow-indigo-600/10 transition-all flex items-center justify-center gap-2 group"
-                >
-                  <Sparkles className="w-4 h-4 text-amber-300 group-hover:scale-110 transition-transform animate-pulse" />
-                  Mine +10 Blocks on Bitcoin Core
-                </button>
-                <span className="text-[10px] text-slate-500 block mt-2.5 leading-normal">
-                  Click to instantly mine 10 blocks on Core via local RPC, establishing the required work advantage and unlocking the portal.
-                </span>
-              </div>
-            ) : isActivationLockout ? (
+            {isActivationLockout ? (
               <div className="pt-6 bg-slate-950/40 border border-slate-800 p-4 rounded-2xl max-w-lg text-xs text-slate-400 leading-relaxed">
-                <strong className="text-amber-400">Fail-closed safety hold.</strong>{' '}
+                <strong className="text-amber-400">Waiting for BLAKE2b activation.</strong>{' '}
                 {nodeInfo.bip110Activation.requiredHeight
-                  ? `Knots is at block ${nodeInfo.bip110Height.toLocaleString()}. Explorer-only verification remains locked until the guaranteed activation height ${nodeInfo.bip110Activation.requiredHeight.toLocaleString()}.`
-                  : 'The backend cannot verify the Knots deployment state. Connect a reachable BIP110 RPC node to unlock from its authoritative consensus state.'}
+                  ? `Knots is at block ${nodeInfo.bip110Height.toLocaleString()}. BLAKE2b activates at block ${nodeInfo.bip110Activation.requiredHeight.toLocaleString()}.`
+                  : 'The backend cannot read the BIP110 Knots chain height.'}
               </div>
             ) : (
               <div className="pt-6 bg-slate-950/40 border border-slate-800 p-4 rounded-2xl max-w-md text-xs text-slate-400 leading-relaxed">
-                🛡️ <strong>Production Safety Hold:</strong> The system is waiting for the Main-Chain (Bitcoin Core) to extend its cumulative proof-of-work lead. The interface will automatically restore functionality as soon as the Main-Chain establishes a strict 10-block lead.
+                <strong>Chain state unavailable.</strong> Check the configured BLAKE2b node or explorer.
               </div>
             )}
           </div>
@@ -2852,7 +2871,7 @@ export default function App() {
                     Deposit Contract Details
                   </h4>
                   <p className="text-xs text-slate-400 mb-4">
-                    Technical details for the deposit address highlighted above. Scriptpath on Bitcoin, keypath on BIP110.
+                    The key path is spendable on either chain; SIGHASH_UNIFIED makes the split transaction valid only on BLAKE2b.
                   </p>
 
                   <div className="bg-slate-950 border border-slate-800 px-3 py-2.5 rounded-xl flex items-center justify-between font-mono text-xs text-sky-300 mb-4">
@@ -3021,8 +3040,8 @@ export default function App() {
                     {/* Step 1: Fund Nodes */}
                     <div className="bg-slate-950 p-4 rounded-xl border border-slate-850 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                       <div className="max-w-md">
-                        <h4 className="text-xs font-bold text-slate-200 mb-1">Step 1: Bootstrap BIP110 Consensus & Miner Wallets</h4>
-                        <p className="text-[10px] text-slate-400">Mine 450 blocks of shared history to activate BIP110 consensus on Knots and mature Coinbase miner rewards.</p>
+                        <h4 className="text-xs font-bold text-slate-200 mb-1">Step 1: Create Shared History Before Activation</h4>
+                        <p className="text-[10px] text-slate-400">Mine 110 shared blocks, use the Bitcoin faucet once (it confirms the shared deposit at 111), then mine the BLAKE2b chain from activation block 112.</p>
                       </div>
                       <button
                         onClick={() => mineBlocks('main', 450)}
@@ -3326,6 +3345,117 @@ export default function App() {
                 </div>
               </form>
             </CollapsibleCard>
+
+            {/* BIP110 RAW TRANSACTION RELAY */}
+            <CollapsibleCard
+              title="Relay a Transaction to BIP110"
+              icon={Globe}
+              defaultOpen={false}
+            >
+              <div className="space-y-6 pt-2">
+            <section className="relative overflow-hidden rounded-2xl border border-sky-500/30 bg-slate-950 shadow-2xl shadow-sky-950/20">
+              <div className="absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b from-sky-300 via-cyan-400 to-emerald-400" />
+              <div className="p-6 pl-8 sm:p-8 sm:pl-10">
+                <div className="mb-7 flex items-start gap-4">
+                  <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-sky-400/30 bg-sky-400/10">
+                    <Globe className="h-5 w-5 text-sky-300" />
+                  </div>
+                  <div>
+                    <span className="mb-2 inline-block rounded border border-sky-500/30 bg-sky-500/10 px-2 py-1 text-[10px] font-black uppercase tracking-[0.18em] text-sky-300">
+                      BIP110 broadcast utility
+                    </span>
+                    <h2 className="text-xl font-bold tracking-tight text-white sm:text-2xl">Relay a signed transaction to Knots</h2>
+                    <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-400">
+                      If your wallet broadcast only to Bitcoin after the chains separated, paste the same signed raw transaction here to submit it directly to the BIP110 network.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mb-6 grid gap-3 sm:grid-cols-3">
+                  {[
+                    ['1', 'Create and sign', 'Use your existing wallet'],
+                    ['2', 'Copy raw hex', 'Do not paste a PSBT'],
+                    ['3', 'Relay to BIP110', networkMode === 'regtest' ? 'Via local Knots RPC' : 'Via the configured Knots source']
+                  ].map(([number, title, detail]) => (
+                    <div key={number} className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                      <span className="text-[10px] font-black tracking-widest text-sky-400">STEP {number}</span>
+                      <strong className="mt-1 block text-xs text-slate-200">{title}</strong>
+                      <span className="mt-1 block text-[11px] text-slate-500">{detail}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <form onSubmit={submitBip110Transaction} className="space-y-4">
+                  <div>
+                    <label htmlFor="bip110-raw-transaction" className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-400">
+                      Signed raw transaction hex
+                    </label>
+                    <textarea
+                      id="bip110-raw-transaction"
+                      value={relayTransactionHex}
+                      onChange={(event) => {
+                        setRelayTransactionHex(event.target.value);
+                        setRelayResult(null);
+                      }}
+                      spellCheck={false}
+                      autoComplete="off"
+                      rows={8}
+                      placeholder="020000000001..."
+                      className="w-full resize-y rounded-xl border border-slate-800 bg-black/35 px-4 py-3 font-mono text-xs leading-6 text-sky-200 outline-none transition focus:border-sky-500/70 focus:ring-2 focus:ring-sky-500/10"
+                    />
+                    <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                      Raw transaction hex is the canonical serialized transaction produced after signing. Private keys, seed phrases, wallet files, and PSBTs are never required.
+                    </p>
+                  </div>
+
+                  {relayPreview && (
+                    'error' in relayPreview ? (
+                      <div className="flex items-center gap-2 rounded-xl border border-rose-500/25 bg-rose-500/10 px-4 py-3 text-xs text-rose-300">
+                        <AlertTriangle className="h-4 w-4 shrink-0" /> {relayPreview.error}
+                      </div>
+                    ) : (
+                      <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.06] p-4">
+                        <div className="mb-3 flex items-center gap-2 text-xs font-bold text-emerald-300">
+                          <CheckCircle className="h-4 w-4" /> Transaction decoded locally
+                        </div>
+                        <dl className="grid grid-cols-2 gap-3 text-xs sm:grid-cols-4">
+                          <div><dt className="text-slate-500">Size</dt><dd className="mt-1 font-mono text-slate-200">{relayPreview.bytes} bytes</dd></div>
+                          <div><dt className="text-slate-500">Virtual size</dt><dd className="mt-1 font-mono text-slate-200">{relayPreview.virtualSize} vB</dd></div>
+                          <div><dt className="text-slate-500">Inputs</dt><dd className="mt-1 font-mono text-slate-200">{relayPreview.inputs}</dd></div>
+                          <div><dt className="text-slate-500">Outputs</dt><dd className="mt-1 font-mono text-slate-200">{relayPreview.outputs}</dd></div>
+                        </dl>
+                        <div className="mt-3 border-t border-emerald-500/10 pt-3">
+                          <span className="text-[10px] uppercase tracking-wider text-slate-500">Expected TXID</span>
+                          <code className="mt-1 block break-all text-[11px] text-emerald-200">{relayPreview.txid}</code>
+                        </div>
+                      </div>
+                    )
+                  )}
+
+                  {relayResult && (
+                    <div className="rounded-xl border border-sky-400/30 bg-sky-400/10 p-4 text-sm text-sky-100">
+                      <strong className="flex items-center gap-2"><CheckCircle className="h-4 w-4" /> Accepted by BIP110</strong>
+                      <code className="mt-2 block break-all text-xs text-sky-200">{relayResult.txid}</code>
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={relaySubmitting || !relayPreview || 'error' in relayPreview}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 px-5 py-3 text-sm font-black text-slate-950 shadow-lg shadow-sky-500/10 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-35"
+                  >
+                    {relaySubmitting ? <RefreshCw className="h-4 w-4 animate-spin" /> : <Globe className="h-4 w-4" />}
+                    {relaySubmitting ? 'Submitting to BIP110…' : 'Submit to BIP110 network'}
+                  </button>
+                </form>
+              </div>
+            </section>
+
+            <div className="rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-5 py-4 text-xs leading-relaxed text-amber-100/80">
+              <strong className="text-amber-300">Before submitting:</strong> verify the transaction spends the intended inputs and pays the intended outputs. The relay broadcasts exactly what you paste and cannot reverse a confirmed transaction.
+            </div>
+              </div>
+            </CollapsibleCard>
           </div>
         )}
 
@@ -3338,7 +3468,7 @@ export default function App() {
               defaultOpen={true}
             >
               <p className="text-xs text-slate-400 mb-6">
-                Split your coins to protect them from replay risk and secure your balances before funding HTLCs.
+                  Split with SIGHASH_UNIFIED on the BLAKE2b chain so the transaction cannot replay on Bitcoin.
               </p>
 
               {/* Dynamic Read-only Split Destination Panel */}
@@ -3491,7 +3621,7 @@ export default function App() {
                       disabled={splittingBilateral || !selectedUtxoToSplit}
                       className="w-full sm:w-auto px-6 py-3 font-semibold text-sm rounded-xl text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-indigo-600/10"
                     >
-                      {splittingBilateral ? 'Executing Main-Chain Scriptpath Spend...' : 'Split Coins (Scriptpath Spend)'}
+                      {splittingBilateral ? 'Signing SIGHASH_UNIFIED Spend...' : 'Split Coins (SIGHASH_UNIFIED)'}
                     </button>
                   )}
                 </div>
@@ -3502,17 +3632,17 @@ export default function App() {
                     <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider">Split spend Results Summary</h4>
                     
                     <div className="grid grid-cols-1 gap-4 text-xs font-mono">
-                      <div className={`p-4 rounded-xl border ${bilateralSplitResult.mainSuccess ? 'bg-emerald-950/20 border-emerald-900/60 text-emerald-300' : 'bg-rose-950/20 border-rose-900/60 text-rose-300'}`}>
-                        <span className="font-bold block mb-1">Bitcoin Core (Main-Chain Scriptpath spend):</span>
-                        {bilateralSplitResult.mainSuccess ? (
+                      <div className={`p-4 rounded-xl border ${bilateralSplitResult.bip110Success ? 'bg-emerald-950/20 border-emerald-900/60 text-emerald-300' : 'bg-rose-950/20 border-rose-900/60 text-rose-300'}`}>
+                        <span className="font-bold block mb-1">BLAKE2b chain (unified key-path spend):</span>
+                        {bilateralSplitResult.bip110Success ? (
                           <div>
-                            <div className="truncate mb-1">✔️ Success! Split Txid: {bilateralSplitResult.mainTxid}</div>
+                            <div className="truncate mb-1">✔️ Success! Split Txid: {bilateralSplitResult.bip110Txid}</div>
                             <div className="text-[10px] text-slate-400 leading-normal mt-2">
-                              Contains banned OP_IF, so BIP110-Chain will reject it, keeping your coins safely split on Knots.
+                              Bitcoin rejects the 0x21 hash type, so the original output remains spendable there.
                             </div>
                           </div>
                         ) : (
-                          <div>Failed: {bilateralSplitResult.mainError}</div>
+                          <div>Failed: {bilateralSplitResult.bip110Error}</div>
                         )}
                       </div>
                     </div>

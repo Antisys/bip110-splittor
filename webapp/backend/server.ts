@@ -10,8 +10,9 @@ import { randomUUID } from 'crypto';
 import { logError, logInfo, logWarn } from './logger';
 import { PureBitcoinSwap } from '../../src/lib/PureBitcoinSwap';
 import { MIN_CROSS_CHAIN_SAFETY_BLOCKS, assertFundingDeadline, secondLockTimeOffset, validateLockTimeOffset } from '../../src/lib/timelocks';
-import { activationFromBlockchainInfo, mainnetHeightFallback, unavailableActivation } from '../../src/lib/bip110Activation';
+import { activationFromBlockchainInfo, mainnetActivationFromHeight, unavailableActivation } from '../../src/lib/bip110Activation';
 import { cachedExplorerRead, closeCache } from './cache';
+import { parseRawTransactionHex } from './transactionSubmission';
 
 import { runMigrations } from './database/migrations';
 import {
@@ -291,9 +292,9 @@ async function mineRegtestBlocks(rpc: BitcoinRpc, blocks: number): Promise<strin
     return rpc.call('generatetoaddress', [blocks, minerAddress]);
 }
 
-// Never advance the lower-work BIP110 simulation without advancing Core first.
-// This mirrors the expected production ordering and prevents Knots from becoming
-// the longer chain during refund fast-forwards.
+// When asked to advance the fork in regtest, advance both independent chains so
+// UI deadlines remain convenient to compare. Their different PoW algorithms
+// mean relative height is not a cross-chain reorg-safety property.
 async function mineRegtestChain(chain: 'main' | 'bip110', blocks: number): Promise<{
     coreHashes: string[];
     bip110Hashes: string[];
@@ -1243,6 +1244,44 @@ app.post('/api/tx/broadcast', async (req: Request, res: Response) => {
     }
 });
 
+// Purpose-built relay for users whose wallet only reached the Bitcoin side of the fork.
+// This endpoint accepts a signed raw transaction only; it never accepts keys or signs data.
+app.post('/api/tx/bip110/submit', async (req: Request, res: Response) => {
+    let parsed;
+    try {
+        parsed = parseRawTransactionHex(req.body?.hex);
+    } catch (err: any) {
+        return res.status(400).json({ error: err.message });
+    }
+
+    try {
+        const rpc = NETWORK_MODE === 'mainnet' ? getProductionRpc('bip110') : bip110MinerRpc;
+        const txid = rpc
+            ? await rpc.call('sendrawtransaction', [parsed.hex])
+            : await getMainnetExplorer('bip110').broadcastTransaction(parsed.hex);
+
+        logInfo('transaction.bip110_relay', {
+            requestId: res.locals.requestId,
+            networkMode: NETWORK_MODE,
+            txid,
+            byteLength: parsed.byteLength,
+            virtualSize: parsed.virtualSize
+        });
+        return res.json({ success: true, txid, transaction: parsed });
+    } catch (err: any) {
+        logWarn('transaction.bip110_relay_rejected', {
+            requestId: res.locals.requestId,
+            networkMode: NETWORK_MODE,
+            txid: parsed.txid,
+            error: err.message
+        });
+        if (NETWORK_MODE === 'mainnet' && !getProductionRpc('bip110')) {
+            return sendExplorerError(res, err, 'BIP110 transaction relay');
+        }
+        return res.status(400).json({ error: err.message, txid: parsed.txid });
+    }
+});
+
 // 9. Node Chain Height Info (Supports both Mainnet and Regtest for real-time safety monitoring)
 app.get('/api/node/info', async (req: Request, res: Response) => {
     if (NETWORK_MODE === 'mainnet') {
@@ -1264,19 +1303,10 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
             : undefined;
         if (mainError) logWarn('chain_tip.unavailable', { requestId: res.locals.requestId, chain: 'main', error: mainError });
         if (bip110Error) logWarn('chain_tip.unavailable', { requestId: res.locals.requestId, chain: 'bip110', error: bip110Error });
-        let bip110Activation = unavailableActivation();
-        const bip110Rpc = getProductionRpc('bip110');
-        if (bip110Rpc) {
-            try {
-                bip110Activation = activationFromBlockchainInfo(await bip110Rpc.call('getblockchaininfo'));
-            } catch (error: any) {
-                logWarn('bip110.activation_unavailable', { requestId: res.locals.requestId, error: error.message });
-            }
-        } else if (bip110Result.status === 'fulfilled') {
-            // Esplora does not expose versionbits state. The BIP guarantees activation
-            // no later than this height, so stay locked until that conservative bound.
-            bip110Activation = mainnetHeightFallback(bip110Result.value);
-        }
+        // Production readiness follows the BLAKE2b fork activation height.
+        const bip110Activation = bip110Result.status === 'fulfilled'
+            ? mainnetActivationFromHeight(bip110Result.value)
+            : unavailableActivation();
         return res.json({
             mainHeight: mainResult.status === 'fulfilled' ? mainResult.value : 0,
             bip110Height: bip110Result.status === 'fulfilled' ? bip110Result.value : 0,
@@ -1290,15 +1320,15 @@ app.get('/api/node/info', async (req: Request, res: Response) => {
 
     // Regtest Mode
     try {
-        const [mainHeight, bip110Height, blockchainInfo] = await Promise.all([
+        const [mainHeight, bip110Height, deploymentInfo] = await Promise.all([
             mainMinerRpc.call('getblockcount'),
             bip110MinerRpc.call('getblockcount'),
-            bip110MinerRpc.call('getblockchaininfo')
+            bip110MinerRpc.call('getdeploymentinfo')
         ]);
         res.json({
             mainHeight,
             bip110Height,
-            bip110Activation: activationFromBlockchainInfo(blockchainInfo)
+            bip110Activation: activationFromBlockchainInfo(deploymentInfo)
         });
     } catch (err: any) {
         logError('node.info_failed', { requestId: res.locals.requestId, error: err.message });

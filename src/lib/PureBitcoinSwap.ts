@@ -1,6 +1,7 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory, ECPairAPI, ECPairInterface } from 'ecpair';
+import { hashForUnifiedKeypath, SIGHASH_ALL_UNIFIED } from './unifiedSighash';
 
 // Initialize Elliptic Curve library in bitcoinjs-lib for Schnorr and Taproot
 bitcoin.initEccLib(ecc);
@@ -23,22 +24,14 @@ export class PureBitcoinSwap {
     }
 
     /**
-     * 1. Replay-Protection Split Script (Main-Chain Spend Path)
-     * OP_IF
-     *   OP_RETURN
-     * OP_ELSE
-     *   <pubKey> OP_CHECKSIG
-     * OP_ENDIF
+     * 1. Inert leaf used only to keep deposit addresses separate from ordinary
+     * wallet addresses. Splitting itself is a key-path spend protected by
+     * SIGHASH_UNIFIED; this leaf is never revealed or executed.
      */
     static createSplitScript(ownerPubKey: Buffer): Buffer {
-        const xOnlyKey = this.getXOnlyPubKey(ownerPubKey);
+        this.getXOnlyPubKey(ownerPubKey); // validate the expected key shape
         return Buffer.from(bitcoin.script.compile([
-            bitcoin.opcodes.OP_IF,
-            bitcoin.opcodes.OP_RETURN,
-            bitcoin.opcodes.OP_ELSE,
-            xOnlyKey,
-            bitcoin.opcodes.OP_CHECKSIG,
-            bitcoin.opcodes.OP_ENDIF
+            bitcoin.opcodes.OP_RETURN
         ]));
     }
 
@@ -160,9 +153,11 @@ export class PureBitcoinSwap {
     }
 
     /**
-     * Builds and signs a Main-Chain Split Spend (Scriptpath spend using OP_IF)
+     * Builds and signs a BLAKE2b-chain split spend using SIGHASH_UNIFIED.
+     * Bitcoin nodes do not recognize the 0x20 opt-in bit and reject this
+     * signature, so the original output remains spendable on Bitcoin.
      */
-    static buildScriptpathSplitTx(
+    static buildUnifiedSplitTx(
         ownerKeyPair: ECPairInterface,
         fundTxid: string,
         outputIndex: number,
@@ -179,50 +174,15 @@ export class PureBitcoinSwap {
         tx.addOutput(bitcoin.address.toOutputScript(destAddr, network), outputSats);
 
         const leafHash = this.tapleafHash(splitScript);
-        const sighash = tx.hashForWitnessV1(
-            0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
-        );
-        const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
-        const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
-        const controlBlock = splitPayment.witness![1];
-
-        tx.setWitness(0, [
-            sig,
-            Buffer.alloc(0), // isBip110 = false (takes the OP_ELSE branch)
-            splitScript,
-            controlBlock
-        ]);
-
-        return tx;
-    }
-
-    /**
-     * Builds and signs a BIP110-Chain Split Spend (Keypath spend via Tweaked Key)
-     */
-    static buildKeypathSplitTx(
-        ownerKeyPair: ECPairInterface,
-        fundTxid: string,
-        outputIndex: number,
-        inputSats: bigint,
-        outputSats: bigint,
-        destAddr: string,
-        splitPayment: bitcoin.payments.Payment,
-        splitScript: Buffer,
-        network: bitcoin.Network = bitcoin.networks.regtest
-    ): bitcoin.Transaction {
-        const tx = new bitcoin.Transaction();
-        tx.version = 2;
-        tx.addInput(Buffer.from(fundTxid, 'hex').reverse(), outputIndex);
-        tx.addOutput(bitcoin.address.toOutputScript(destAddr, network), outputSats);
-
-        const leafHash = this.tapleafHash(splitScript);
-        const sighash = tx.hashForWitnessV1(
-            0, [splitPayment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
-        );
-
+        const sighash = hashForUnifiedKeypath(tx, 0, [{
+            value: inputSats,
+            script: splitPayment.output!
+        }]);
         const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, leafHash, network);
-        const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
-
+        const sig = Buffer.concat([
+            Buffer.from(tweakedPair.signSchnorr(sighash)),
+            Buffer.from([SIGHASH_ALL_UNIFIED])
+        ]);
         tx.setWitness(0, [sig]);
 
         return tx;
@@ -502,36 +462,18 @@ export class PureBitcoinSwap {
         }
 
         const pubKey = Buffer.from(ownerKeyPair.publicKey);
+        void isMainChain; // retained for API compatibility; signing is identical on both chains
 
         if (isSplitAddress) {
             // Need script tree for split contract
             const splitPaymentInfo = this.createSplitPayment(pubKey, network);
 
-            if (isMainChain) {
-                // Main-Chain split spend uses the OP_IF Scriptpath
-                const leafHash = this.tapleafHash(splitPaymentInfo.script);
-                const sighash = tx.hashForWitnessV1(
-                    0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT, leafHash
-                );
-                const schnorrKey = this.getSchnorrKeyPair(ownerKeyPair, network);
-                const sig = Buffer.from(schnorrKey.signSchnorr(sighash));
-
-                const controlBlock = splitPaymentInfo.payment.witness![1];
-                tx.setWitness(0, [
-                    sig,
-                    Buffer.alloc(0), // isBip110 = false (takes the OP_ELSE branch)
-                    splitPaymentInfo.script,
-                    controlBlock
-                ]);
-            } else {
-                // BIP110 split spend uses Keypath (tweaked with Merkle root)
-                const sighash = tx.hashForWitnessV1(
-                    0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
-                );
-                const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, splitPaymentInfo.leafHash, network);
-                const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
-                tx.setWitness(0, [sig]);
-            }
+            const sighash = tx.hashForWitnessV1(
+                0, [splitPaymentInfo.payment.output!], [inputSats], bitcoin.Transaction.SIGHASH_DEFAULT
+            );
+            const tweakedPair = this.getTweakedKeyPair(ownerKeyPair, splitPaymentInfo.leafHash, network);
+            const sig = Buffer.from(tweakedPair.signSchnorr(sighash));
+            tx.setWitness(0, [sig]);
         } else {
             // Simple P2TR Keypath spend from ownAddress (requires standard TapTweak committing to empty script root)
             const ownPayment = bitcoin.payments.p2tr({
