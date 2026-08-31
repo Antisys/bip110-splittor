@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 interface RpcConfig {
   host: string;
@@ -16,9 +16,10 @@ interface AppConfig {
 interface SettingsProps {
   config: AppConfig;
   onChange: (config: AppConfig) => void;
+  pubkey: string;
 }
 
-export function Settings({ config, onChange }: SettingsProps) {
+export function Settings({ config, onChange, pubkey }: SettingsProps) {
   const [relays, setRelays] = useState(config.relays.join('\n'));
   const [b110, setB110] = useState(config.b110Rpc);
   const [main, setMain] = useState(config.mainRpc);
@@ -37,6 +38,13 @@ export function Settings({ config, onChange }: SettingsProps) {
       <h2 className="text-lg font-semibold">Settings</h2>
 
       <div className="space-y-4">
+        <div>
+          <label className="block text-sm text-slate-400 mb-2">Your Nostr Public Key</label>
+          <div className="bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-slate-300 break-all select-all">
+            {pubkey || 'Not connected'}
+          </div>
+        </div>
+
         <div>
           <label className="block text-sm text-slate-400 mb-2">Nostr Relays</label>
           <textarea

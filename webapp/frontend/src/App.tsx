@@ -98,6 +98,11 @@ export default function App() {
                 {connected ? 'Connected' : 'Disconnected'}
               </span>
             </div>
+            {client?.getPubkey() && (
+              <div className="text-xs text-slate-500 font-mono">
+                {client.getPubkey().slice(0, 8)}...{client.getPubkey().slice(-4)}
+              </div>
+            )}
             <span className="text-sm text-slate-400">{offers.length} offers</span>
           </div>
         </div>
@@ -139,7 +144,7 @@ export default function App() {
           <SwapView />
         )}
         {tab === 'settings' && (
-          <Settings config={config} onChange={setConfig} />
+          <Settings config={config} onChange={setConfig} pubkey={client?.getPubkey() || ''} />
         )}
       </main>
     </div>
