@@ -1,6 +1,7 @@
 import * as bitcoin from 'bitcoinjs-lib';
 import * as ecc from '@bitcoinerlab/secp256k1';
 import { ECPairFactory, ECPairAPI, ECPairInterface } from 'ecpair';
+import { MIN_FEE_SATS, MIN_LOCKTIME_OFFSET_BLOCKS } from './timelocks';
 
 // Initialize Elliptic Curve library in bitcoinjs-lib for Schnorr and Taproot
 bitcoin.initEccLib(ecc);
@@ -62,6 +63,9 @@ export class PureBitcoinSwap {
      * <lockTime> OP_CHECKLOCKTIMEVERIFY OP_DROP <refundPubKey> OP_CHECKSIG
      */
     static createHtlcRefundScript(refundPubKey: Buffer, lockTime: number): Buffer {
+        if (!Number.isSafeInteger(lockTime) || lockTime < MIN_LOCKTIME_OFFSET_BLOCKS) {
+            throw new Error(`lockTime must be at least ${MIN_LOCKTIME_OFFSET_BLOCKS} blocks (got ${lockTime})`);
+        }
         const xOnlyRefund = this.getXOnlyPubKey(refundPubKey);
         const locktimeBuffer = bitcoin.script.number.encode(lockTime);
         return Buffer.from(bitcoin.script.compile([
@@ -250,7 +254,7 @@ export class PureBitcoinSwap {
         
         const finalOutputSats = outputSats;
         const changeSats = inputSats - finalOutputSats - feeSats;
-        if (finalOutputSats <= 0n || feeSats < 0n || changeSats < 0n) throw new Error('Insufficient input for the exact HTLC amount and fee');
+        if (finalOutputSats <= 0n || feeSats < MIN_FEE_SATS || changeSats < 0n) throw new Error(`Insufficient input for the exact HTLC amount and fee (minimum fee: ${MIN_FEE_SATS} sats)`);
         if (changeSats > 0n && !changeAddr) throw new Error('A change address is required; refusing to donate change as miner fee');
 
         // 1. Add HTLC contract output
@@ -305,8 +309,8 @@ export class PureBitcoinSwap {
         const totalInputSats = inputs.reduce((sum, input) => sum + input.amount, 0n);
         const finalOutputSats = outputSats;
         const changeSats = totalInputSats - finalOutputSats - coordinatorFeeSats - feeSats;
-        if (inputs.length === 0 || finalOutputSats <= 0n || feeSats < 0n || coordinatorFeeSats < 0n || changeSats < 0n) {
-            throw new Error('Insufficient input for the exact HTLC amount, coordinator fee, and miner fee');
+        if (inputs.length === 0 || finalOutputSats <= 0n || feeSats < MIN_FEE_SATS || coordinatorFeeSats < 0n || changeSats < 0n) {
+            throw new Error(`Insufficient input for the exact HTLC amount, coordinator fee, and miner fee (minimum fee: ${MIN_FEE_SATS} sats)`);
         }
         if (changeSats > 0n && !changeAddr) throw new Error('A change address is required; refusing to donate change as miner fee');
 
@@ -490,7 +494,7 @@ export class PureBitcoinSwap {
 
         const finalWithdrawSats = withdrawSats;
         const changeSats = inputSats - finalWithdrawSats - feeSats;
-        if (finalWithdrawSats <= 0n || feeSats < 0n || changeSats < 0n) throw new Error('Insufficient input for the exact withdrawal amount and fee');
+        if (finalWithdrawSats <= 0n || feeSats < MIN_FEE_SATS || changeSats < 0n) throw new Error(`Insufficient input for the exact withdrawal amount and fee (minimum fee: ${MIN_FEE_SATS} sats)`);
         if (changeSats > 0n && !changeAddress) throw new Error('A change address is required; refusing to donate change as miner fee');
 
         // 1. Add withdrawal output

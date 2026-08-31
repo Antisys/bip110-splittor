@@ -1,6 +1,7 @@
 export const MIN_LOCKTIME_OFFSET_BLOCKS = 288;
 export const MIN_CROSS_CHAIN_SAFETY_BLOCKS = 72;
 export const MAX_FUNDING_REGISTRATION_DELAY_BLOCKS = 12;
+export const MIN_FEE_SATS = 1000n;
 
 export function validateLockTimeOffset(value: unknown): number {
     const offset = Number(value);
